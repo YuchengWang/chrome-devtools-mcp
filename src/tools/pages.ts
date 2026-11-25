@@ -21,6 +21,22 @@ import {
   type ToolFactory,
 } from './ToolDefinition.js';
 
+function isBrowserDisconnected(page: ContextPage): boolean {
+  return page.pptrPage.browser()?.connected === false;
+}
+
+function disconnectedNavigationError(
+  actionDescription: string,
+  cause: unknown,
+): Error {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return new Error(
+    `Browser CDP connection disconnected during ${actionDescription} (${detail}). ` +
+      'The underlying Chrome or local CDP proxy connection closed; re-run browser_prepare (if using cua-ycwang) and connect_browser to re-attach.',
+    {cause},
+  );
+}
+
 export const listPages: ToolFactory = defineTool((args: ParsedArguments) => {
   return {
     name: 'list_pages',
@@ -172,6 +188,9 @@ export const newPage: ToolFactory = defineTool((args: ParsedArguments) => {
           {timeout: request.params.timeout},
         );
       } catch (error) {
+        if (isBrowserDisconnected(page)) {
+          throw disconnectedNavigationError('new_page', error);
+        }
         // A dialog-blocked load stays open for handle_dialog. Otherwise cleanup is
         // best-effort: the navigation error is always what gets rethrown.
         if (page.getDialog()) {
@@ -272,66 +291,69 @@ export const navigatePage: PageToolFactory = definePageTool(
           initScriptId = identifier;
         }
 
+        const runNavigationStep = async (
+          actionFn: () => Promise<unknown>,
+          successMessage: () => string,
+          failurePrefix: string,
+        ): Promise<void> => {
+          try {
+            await actionFn();
+            response.appendResponseLine(successMessage());
+          } catch (error) {
+            if (isBrowserDisconnected(page)) {
+              throw error;
+            }
+            const detail =
+              error instanceof Error ? error.message : String(error);
+            response.appendResponseLine(`${failurePrefix}: ${detail}.`);
+          }
+        };
+
         try {
           const action = request.params.handleBeforeUnload ?? 'accept';
           const result = await page.waitForEventsAfterAction(
             async () => {
               switch (request.params.type) {
-                case 'url':
-                  if (!request.params.url) {
+                case 'url': {
+                  const targetUrl = request.params.url;
+                  if (!targetUrl) {
                     throw new Error(
                       'A URL is required for navigation of type=url.',
                     );
                   }
-                  try {
-                    await page.pptrPage.goto(request.params.url, options);
-                    response.appendResponseLine(
-                      `Successfully navigated to ${request.params.url}.`,
-                    );
-                  } catch (error) {
-                    response.appendResponseLine(
-                      `Unable to navigate in the selected page: ${error.message}.`,
-                    );
-                  }
+                  await runNavigationStep(
+                    () => page.pptrPage.goto(targetUrl, options),
+                    () => `Successfully navigated to ${targetUrl}.`,
+                    'Unable to navigate in the selected page',
+                  );
                   break;
+                }
                 case 'back':
-                  try {
-                    await page.pptrPage.goBack(options);
-                    response.appendResponseLine(
+                  await runNavigationStep(
+                    () => page.pptrPage.goBack(options),
+                    () =>
                       `Successfully navigated back to ${page.pptrPage.url()}.`,
-                    );
-                  } catch (error) {
-                    response.appendResponseLine(
-                      `Unable to navigate back in the selected page: ${error.message}.`,
-                    );
-                  }
+                    'Unable to navigate back in the selected page',
+                  );
                   break;
                 case 'forward':
-                  try {
-                    await page.pptrPage.goForward(options);
-                    response.appendResponseLine(
+                  await runNavigationStep(
+                    () => page.pptrPage.goForward(options),
+                    () =>
                       `Successfully navigated forward to ${page.pptrPage.url()}.`,
-                    );
-                  } catch (error) {
-                    response.appendResponseLine(
-                      `Unable to navigate forward in the selected page: ${error.message}.`,
-                    );
-                  }
+                    'Unable to navigate forward in the selected page',
+                  );
                   break;
                 case 'reload':
-                  try {
-                    await page.pptrPage.reload({
-                      ...options,
-                      ignoreCache: request.params.ignoreCache,
-                    });
-                    response.appendResponseLine(
-                      `Successfully reloaded the page.`,
-                    );
-                  } catch (error) {
-                    response.appendResponseLine(
-                      `Unable to reload the selected page: ${error.message}.`,
-                    );
-                  }
+                  await runNavigationStep(
+                    () =>
+                      page.pptrPage.reload({
+                        ...options,
+                        ignoreCache: request.params.ignoreCache,
+                      }),
+                    () => `Successfully reloaded the page.`,
+                    'Unable to reload the selected page',
+                  );
                   break;
               }
             },
@@ -346,8 +368,13 @@ export const navigatePage: PageToolFactory = definePageTool(
             );
             page.clearDialog();
           }
+        } catch (error) {
+          if (isBrowserDisconnected(page)) {
+            throw disconnectedNavigationError('navigate_page', error);
+          }
+          throw error;
         } finally {
-          if (initScriptId) {
+          if (initScriptId && !isBrowserDisconnected(page)) {
             await page.pptrPage
               .removeScriptToEvaluateOnNewDocument(initScriptId)
               .catch(error => {

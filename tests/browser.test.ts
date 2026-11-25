@@ -1691,5 +1691,61 @@ describe('browser', () => {
       sinon.assert.calledOnce(browser1.disconnect);
       await manager.close();
     });
+
+    it('explains local CDP proxy closure when connecting to wsEndpoint fails with ECONNREFUSED', async () => {
+      const {createStub} = stubConnectTransport();
+      const rawErr = Object.assign(
+        new Error('connect ECONNREFUSED 127.0.0.1:19999'),
+        {code: 'ECONNREFUSED'},
+      );
+      createStub.onFirstCall().rejects(rawErr);
+      const aggregateErr = new AggregateError(
+        [Object.assign(new Error(''), {code: 'ECONNREFUSED'})],
+        '',
+      );
+      createStub.onSecondCall().rejects(aggregateErr);
+
+      const manager = new BrowserManager(createMockServerConfig());
+
+      for (const expectedCause of [rawErr, aggregateErr]) {
+        await assert.rejects(
+          manager.connectBrowser({
+            wsEndpoint: 'ws://127.0.0.1:19999/devtools/browser/stale',
+          }),
+          err => {
+            assert.ok(err instanceof Error);
+            assert.strictEqual(err.cause, expectedCause);
+            assert.match(
+              err.message,
+              /Could not connect to Chrome via wsEndpoint \(ECONNREFUSED\)/,
+            );
+            assert.match(err.message, /browser_prepare/);
+            assert.match(err.message, /ws_endpoint/);
+            return true;
+          },
+        );
+      }
+      await manager.close();
+    });
+
+    it('keeps generic message when browserUrl fails with ECONNREFUSED', async () => {
+      stubBrowserUrlFetch('ws://127.0.0.1:9333/devtools/browser/from-http');
+      const {createStub} = stubConnectTransport();
+      createStub.rejects(new Error('connect ECONNREFUSED 127.0.0.1:9333'));
+
+      const manager = new BrowserManager(createMockServerConfig());
+      await assert.rejects(
+        manager.connectBrowser({browserUrl: 'http://127.0.0.1:9333'}),
+        err => {
+          assert.ok(err instanceof Error);
+          assert.match(
+            err.message,
+            /^Could not connect to Chrome\. Check if Chrome is running\.$/,
+          );
+          return true;
+        },
+      );
+      await manager.close();
+    });
   });
 });

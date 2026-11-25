@@ -49,6 +49,35 @@ interface ResolvedBrowserTarget {
   headless: boolean;
 }
 
+function isConnectionRefusedError(err: unknown, depth = 0): boolean {
+  if (depth > 4) {
+    return false;
+  }
+  if (typeof err === 'string') {
+    return err.includes('ECONNREFUSED');
+  }
+  if (typeof err !== 'object' || err === null) {
+    return false;
+  }
+  if ('code' in err && err.code === 'ECONNREFUSED') {
+    return true;
+  }
+  if (err instanceof Error && err.message.includes('ECONNREFUSED')) {
+    return true;
+  }
+  if (
+    'errors' in err &&
+    Array.isArray(err.errors) &&
+    err.errors.some(item => isConnectionRefusedError(item, depth + 1))
+  ) {
+    return true;
+  }
+  if ('cause' in err && err.cause !== undefined) {
+    return isConnectionRefusedError(err.cause, depth + 1);
+  }
+  return false;
+}
+
 function headersEqual(
   a?: Record<string, string>,
   b?: Record<string, string>,
@@ -979,6 +1008,15 @@ export class BrowserManager {
       const permissionError = devToolsActivePortPermissionError(err);
       if (permissionError) {
         throw permissionError;
+      }
+      if (wsEndpoint && isConnectionRefusedError(err)) {
+        throw new Error(
+          'Could not connect to Chrome via wsEndpoint (ECONNREFUSED). ' +
+            'The local CDP proxy endpoint may have closed or expired; re-run browser_prepare to obtain a fresh ws_endpoint and retry connect_browser.',
+          {
+            cause: err,
+          },
+        );
       }
       throw new Error(
         `Could not connect to Chrome. ${autoConnect ? `Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.` : `Check if Chrome is running.`}`,

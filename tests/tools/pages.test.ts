@@ -27,6 +27,7 @@ import {
   createMockDialog,
   createMockMcpPage,
   createMockParsedArguments,
+  createMockPuppeteerBrowser,
 } from '../mocks.js';
 import {
   assertNoServiceWorkerReported,
@@ -381,6 +382,40 @@ describe('pages', () => {
       sinon.assert.notCalled(context.selectPage);
       sinon.assert.notCalled(context.closePage);
       sinon.assert.calledOnceWithExactly(response.setIncludePages, true);
+    });
+    it('throws disconnect error without closing tab or listing stale pages when browser disconnects during navigation', async () => {
+      const {context, response, args} = createHandlerMocks();
+      const page = createMockMcpPage();
+      const disconnectedBrowser = createMockPuppeteerBrowser();
+      sinon.stub(disconnectedBrowser, 'connected').get(() => false);
+      page.pptrPage.browser.returns(disconnectedBrowser);
+      Object.defineProperty(page, 'id', {value: 2});
+      context.newPage.resolves(page);
+      const cause = new Error('Protocol error (Page.navigate): Target closed');
+      page.pptrPage.goto.rejects(cause);
+
+      await assert.rejects(
+        newPage(args).handler(
+          {params: {url: 'https://example.com'}},
+          response,
+          context,
+        ),
+        err => {
+          assert.ok(err instanceof Error);
+          assert.strictEqual(err.cause, cause);
+          assert.match(
+            err.message,
+            /Browser CDP connection disconnected during new_page/,
+          );
+          assert.match(err.message, /browser_prepare/);
+          assert.match(err.message, /connect_browser/);
+          return true;
+        },
+      );
+
+      sinon.assert.notCalled(context.selectPage);
+      sinon.assert.notCalled(context.closePage);
+      sinon.assert.notCalled(response.setIncludePages);
     });
     it('create a page', async () => {
       await withMcpContext(async (response, context, args) => {
@@ -1554,6 +1589,91 @@ describe('pages', () => {
         const result = await response.handle(context);
         t.assert.snapshot(JSON.stringify(result));
       });
+    });
+
+    for (const type of ['url', 'back', 'forward', 'reload'] as const) {
+      it(`throws disconnect error without listing stale pages when browser disconnects during ${type} navigation`, async () => {
+        const {page, context, response, args} = createHandlerMocks();
+        const disconnectedBrowser = createMockPuppeteerBrowser();
+        sinon.stub(disconnectedBrowser, 'connected').get(() => false);
+        page.pptrPage.browser.returns(disconnectedBrowser);
+
+        const cause = new Error('Connection closed');
+        page.pptrPage.goto.rejects(cause);
+        page.pptrPage.goBack.rejects(cause);
+        page.pptrPage.goForward.rejects(cause);
+        page.pptrPage.reload.rejects(cause);
+
+        await assert.rejects(
+          navigatePage(args).handler(
+            {
+              params: {
+                type,
+                ...(type === 'url' ? {url: 'https://example.com'} : {}),
+              },
+              page,
+            },
+            response,
+            context,
+          ),
+          err => {
+            assert.ok(err instanceof Error);
+            assert.strictEqual(err.cause, cause);
+            assert.match(
+              err.message,
+              /Browser CDP connection disconnected during navigate_page/,
+            );
+            assert.match(err.message, /browser_prepare/);
+            assert.match(err.message, /connect_browser/);
+            return true;
+          },
+        );
+
+        sinon.assert.notCalled(response.appendResponseLine);
+        sinon.assert.notCalled(response.setIncludePages);
+      });
+    }
+
+    it('throws disconnect error and skips initScript cleanup if waitForEventsAfterAction fails after disconnect', async () => {
+      const {page, context, response, args} = createHandlerMocks();
+      const disconnectedBrowser = createMockPuppeteerBrowser();
+      let connected = true;
+      sinon.stub(disconnectedBrowser, 'connected').get(() => connected);
+      page.pptrPage.browser.returns(disconnectedBrowser);
+      page.pptrPage.evaluateOnNewDocument.resolves({identifier: 'init-1'});
+      const cause = new Error(
+        'Session closed. Most likely the page has been closed.',
+      );
+      page.waitForEventsAfterAction.callsFake(async () => {
+        connected = false;
+        throw cause;
+      });
+
+      await assert.rejects(
+        navigatePage(args).handler(
+          {
+            params: {
+              url: 'https://example.com',
+              initScript: 'window.__test = true;',
+            },
+            page,
+          },
+          response,
+          context,
+        ),
+        err => {
+          assert.ok(err instanceof Error);
+          assert.strictEqual(err.cause, cause);
+          assert.match(
+            err.message,
+            /Browser CDP connection disconnected during navigate_page/,
+          );
+          return true;
+        },
+      );
+
+      sinon.assert.notCalled(page.pptrPage.removeScriptToEvaluateOnNewDocument);
+      sinon.assert.notCalled(response.setIncludePages);
     });
   });
   describe('resize', () => {

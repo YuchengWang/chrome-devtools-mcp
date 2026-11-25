@@ -10,10 +10,7 @@ import type {JSHandle} from '../third_party/browser.js';
 import {validateUrl} from '../utils/url.js';
 
 import {ToolCategory} from './categories.js';
-import {
-  definePageTool,
-  type PageToolFactory,
-} from './ToolDefinition.js';
+import {definePageTool, type PageToolFactory} from './ToolDefinition.js';
 
 // eslint-disable-next-line @local/enforce-zod-schema -- Nested action schema.
 const batchActionSchema = zod.object({
@@ -251,9 +248,7 @@ export const batchActions: PageToolFactory = definePageTool(
             ? {interactiveOnly: opts.interactiveOnly}
             : {}),
           ...(opts?.roles !== undefined ? {roles: opts.roles} : {}),
-          ...(opts?.formsOnly !== undefined
-            ? {formsOnly: opts.formsOnly}
-            : {}),
+          ...(opts?.formsOnly !== undefined ? {formsOnly: opts.formsOnly} : {}),
           ...(opts?.outlineOnly !== undefined
             ? {outlineOnly: opts.outlineOnly}
             : {}),

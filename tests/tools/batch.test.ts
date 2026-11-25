@@ -11,7 +11,11 @@ import sinon from 'sinon';
 
 import {McpResponse} from '../../src/McpResponse.js';
 import {batchActions} from '../../src/tools/batch.js';
-import {createHandlerMocks, createMockElementHandle, createMockServerConfig} from '../mocks.js';
+import {
+  createHandlerMocks,
+  createMockElementHandle,
+  createMockServerConfig,
+} from '../mocks.js';
 import {getTextContent} from '../utils.js';
 
 describe('batch_actions', () => {

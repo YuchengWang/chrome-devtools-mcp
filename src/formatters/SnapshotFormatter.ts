@@ -179,9 +179,9 @@ Get a verbose snapshot to include all elements if you are interested in the sele
   #hasNodeFilter(): boolean {
     return Boolean(
       this.#options.outlineOnly ||
-        this.#roleFilter ||
-        this.#options.formsOnly ||
-        this.#options.interactiveOnly,
+      this.#roleFilter ||
+      this.#options.formsOnly ||
+      this.#options.interactiveOnly,
     );
   }
 

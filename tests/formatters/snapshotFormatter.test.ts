@@ -693,13 +693,20 @@ describe('snapshotFormatter', () => {
     });
 
     const emptyForms = new SnapshotFormatter(
-      {root: createNode('2_0', 'RootWebArea', 'Article', [createNode('2_1', 'link', 'Read')]), verbose: false} as TextSnapshot,
+      {
+        root: createNode('2_0', 'RootWebArea', 'Article', [
+          createNode('2_1', 'link', 'Read'),
+        ]),
+        verbose: false,
+      } as TextSnapshot,
       {formsOnly: true},
     );
     assert.ok(
       emptyForms
         .toString()
-        .includes('No matching form/action nodes found for formsOnly under uid=2_0'),
+        .includes(
+          'No matching form/action nodes found for formsOnly under uid=2_0',
+        ),
     );
   });
 

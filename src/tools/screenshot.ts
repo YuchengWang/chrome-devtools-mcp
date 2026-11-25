@@ -66,12 +66,7 @@ function getImageDimensions(
     return undefined;
   }
   if (format === 'webp' && data.length >= 30) {
-    const chunk = String.fromCharCode(
-      data[12],
-      data[13],
-      data[14],
-      data[15],
-    );
+    const chunk = String.fromCharCode(data[12], data[13], data[14], data[15]);
     if (chunk === 'VP8X') {
       const width = 1 + (data[24] | (data[25] << 8) | (data[26] << 16));
       const height = 1 + (data[27] | (data[28] << 8) | (data[29] << 16));

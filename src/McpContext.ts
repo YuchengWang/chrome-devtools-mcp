@@ -55,7 +55,7 @@ import {
   type SupportedExtensions,
 } from './tools/ToolDefinition.js';
 import type {TraceResult} from './processors/PerformanceTrace.js';
-import type {Logger} from './types.js';
+import type {ConnectBrowserOptions, Logger} from './types.js';
 import {McpWorker} from './McpWorker.js';
 import {
   fileUrlToPathWithPosixFallback,
@@ -81,6 +81,11 @@ export interface McpContextOptions {
   // Returns the browser to use. Called by ensureBrowser(), so the browser
   // connection is only established once a tool needs it.
   getBrowser: () => Promise<Browser>;
+  // Dynamically switches or establishes the active browser connection.
+  connectBrowser?: (
+    options: ConnectBrowserOptions,
+    onSwitched?: (browser: Browser) => Promise<void> | void,
+  ) => Promise<Browser>;
 }
 
 interface OptionGate {
@@ -378,6 +383,34 @@ export class McpContext implements Context, BrowserlessContext {
       }
       throw err;
     }
+  }
+
+  /**
+   * Hot-switches the active browser to a new endpoint or launched isolated
+   * instance, resetting stale page/worker state and re-initializing against
+   * the new browser before returning.
+   */
+  async connectBrowser(options: ConnectBrowserOptions): Promise<Browser> {
+    if (!this.#options.connectBrowser) {
+      throw new Error(
+        'Dynamic browser connection is not configured for this context.',
+      );
+    }
+    return await this.#options.connectBrowser(options, async browser => {
+      this.#resetBrowserState();
+      this.#browser = browser;
+      const ready = this.#initBrowserState(browser);
+      this.#browserReady = ready;
+      try {
+        await ready;
+        this.#reconnectNotice = false;
+      } catch (err) {
+        if (this.#browserReady === ready) {
+          this.#resetBrowserState();
+        }
+        throw err;
+      }
+    });
   }
 
   async #initBrowserState(browser: Browser): Promise<void> {

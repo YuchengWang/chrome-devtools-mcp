@@ -1151,6 +1151,57 @@ describe('McpContext', () => {
         context.dispose();
       });
     });
+
+    it('synchronizes pages and clears stale state on dynamic connectBrowser() switch', async () => {
+      const browser1 = createBrowser();
+      const browser2 = createBrowser();
+      const target1 = createMockPuppeteerTarget();
+      const target2 = createMockPuppeteerTarget();
+      browser1.targets.returns([target1]);
+      browser2.targets.returns([target2]);
+      sinon.stub(McpPage.prototype, 'init').resolves();
+
+      const taskRunner = new TaskRunner();
+      let activeBrowser: Browser = browser1;
+      const context = McpContext.create(
+        undefined,
+        {
+          config: createMockServerConfig({performanceCrux: false}),
+          heapSnapshotManager: new HeapSnapshotManager(taskRunner),
+          taskRunner,
+          getBrowser: async () => activeBrowser,
+          connectBrowser: async (_options, onSwitched) => {
+            activeBrowser = browser2;
+            await onSwitched?.(browser2);
+            return browser2;
+          },
+        },
+        Locator,
+      );
+
+      await context.ensureBrowser();
+      const oldPages = context.getPages();
+      assert.strictEqual(oldPages.length, 1);
+      const oldPage = oldPages[0];
+      const disposeSpy = sinon.spy(oldPage, 'dispose');
+
+      await context.connectBrowser({
+        wsEndpoint: 'ws://127.0.0.1:12345/devtools/browser/new',
+      });
+
+      assert.strictEqual(context.browser, browser2);
+      sinon.assert.calledOnce(disposeSpy);
+      assert.throws(() => context.getPageById(oldPage.id), /No page found/);
+      const newPages = context.getPages();
+      assert.strictEqual(newPages.length, 1);
+      assert.strictEqual(newPages[0].target, target2);
+      assert.strictEqual(
+        context.consumeReconnectNotice(),
+        false,
+        'explicit hot-switch must not emit reconnect warning banner',
+      );
+      context.dispose();
+    });
   });
 
   it('should include network requests in structured content', async t => {

@@ -20,16 +20,124 @@ import type {
   PuppeteerNode,
 } from './third_party/browser.js';
 import {loadBrowser, Mutex} from './third_party/index.js';
+import type {ConnectBrowserOptions} from './types.js';
 import {devToolsActivePortPermissionError} from './utils/errorHandling.js';
 import {
   logger,
   puppeteerLogger,
   redactConnectOptionsForLogging,
 } from './utils/logger.js';
-import {isAllowedUrl} from './utils/url.js';
+import {
+  isAllowedUrl,
+  validateBrowserUrl,
+  validateWsEndpoint,
+} from './utils/url.js';
 
 export interface BrowserManagerOptions {
   logFile?: fs.WriteStream;
+}
+
+interface ResolvedBrowserTarget {
+  browserUrl?: string;
+  wsEndpoint?: string;
+  wsHeaders?: Record<string, string>;
+  autoConnect: boolean;
+  userDataDir?: string;
+  channel?: 'canary' | 'dev' | 'beta' | 'stable';
+  isolated: boolean;
+  incognito: boolean;
+  headless: boolean;
+}
+
+function headersEqual(
+  a?: Record<string, string>,
+  b?: Record<string, string>,
+): boolean {
+  const entriesA = Object.entries(a ?? {});
+  const entriesB = Object.entries(b ?? {});
+  if (entriesA.length !== entriesB.length) {
+    return false;
+  }
+  for (const [key, value] of entriesA) {
+    if (!b || !Object.hasOwn(b, key) || b[key] !== value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function validateConnectBrowserOptions(
+  options: ConnectBrowserOptions,
+): void {
+  const hasTarget = Boolean(
+    options.wsEndpoint ||
+    options.browserUrl ||
+    options.autoConnect ||
+    options.isolated ||
+    options.incognito ||
+    options.userDataDir !== undefined,
+  );
+  if (!hasTarget) {
+    throw new Error(
+      'Provide at least one target option (wsEndpoint, browserUrl, autoConnect, userDataDir, isolated, or incognito).',
+    );
+  }
+  if (options.wsEndpoint && options.browserUrl) {
+    throw new Error('wsEndpoint and browserUrl are mutually exclusive.');
+  }
+  if (options.wsEndpoint !== undefined) {
+    if (!options.wsEndpoint.trim()) {
+      throw new Error('wsEndpoint must not be empty.');
+    }
+    validateWsEndpoint(options.wsEndpoint);
+  }
+  if (options.browserUrl !== undefined) {
+    if (!options.browserUrl.trim()) {
+      throw new Error('browserUrl must not be empty.');
+    }
+    validateBrowserUrl(options.browserUrl);
+  }
+  if (options.wsHeaders !== undefined) {
+    if (!options.wsEndpoint && !options.browserUrl) {
+      throw new Error(
+        'wsHeaders can only be used together with wsEndpoint or browserUrl.',
+      );
+    }
+    for (const [key, value] of Object.entries(options.wsHeaders)) {
+      if (typeof value !== 'string') {
+        throw new Error(`Header "${key}" must have a string value`);
+      }
+    }
+  }
+  if (options.autoConnect && (options.wsEndpoint || options.browserUrl)) {
+    throw new Error(
+      'autoConnect cannot be combined with wsEndpoint or browserUrl.',
+    );
+  }
+  if (options.userDataDir !== undefined) {
+    if (!options.userDataDir.trim() || options.userDataDir.includes('\0')) {
+      throw new Error('userDataDir must be a valid non-empty directory path.');
+    }
+    if (options.wsEndpoint || options.browserUrl) {
+      throw new Error(
+        'userDataDir cannot be combined with wsEndpoint or browserUrl.',
+      );
+    }
+    if (options.isolated) {
+      throw new Error('userDataDir cannot be combined with isolated: true.');
+    }
+  }
+  const hasLaunchOptions = Boolean(
+    options.isolated || options.incognito || options.headless !== undefined,
+  );
+  if (
+    hasLaunchOptions &&
+    (options.wsEndpoint || options.browserUrl || options.autoConnect)
+  ) {
+    throw new Error(
+      'Launch options (isolated, incognito, headless) cannot be combined with wsEndpoint, browserUrl, or autoConnect.',
+    );
+  }
 }
 
 export interface AbortableTransportHandle {
@@ -139,6 +247,7 @@ async function loadPuppeteer(): Promise<PuppeteerNode> {
 export class BrowserManager {
   #browser?: Browser;
   #browserMode?: 'launched' | 'connected';
+  #activeTarget?: ResolvedBrowserTarget;
   #initPromise?: Promise<Browser>;
   #mutex = new Mutex();
   #closingCount = 0;
@@ -328,23 +437,154 @@ export class BrowserManager {
     this.#forgetCurrentBrowser();
   }
 
-  async #initBrowser(): Promise<Browser> {
-    if (
-      this.#config.resolved.browserUrl ||
-      this.#config.resolved.wsEndpoint ||
-      this.#config.resolved.autoConnect
-    ) {
-      return await this.#connect();
+  #effectiveTarget(): ResolvedBrowserTarget {
+    if (this.#activeTarget) {
+      return this.#activeTarget;
     }
-    return await this.#launch();
+    return {
+      browserUrl: this.#config.resolved.browserUrl,
+      wsEndpoint: this.#config.resolved.wsEndpoint,
+      wsHeaders: this.#config.resolved.wsHeaders,
+      autoConnect: Boolean(this.#config.resolved.autoConnect),
+      userDataDir: this.#config.resolved.userDataDir,
+      channel: this.#config.resolved.channel,
+      isolated: Boolean(this.#config.resolved.isolated),
+      incognito: false,
+      headless: Boolean(this.#config.resolved.headless),
+    };
   }
 
-  async #launch(): Promise<Browser> {
+  #targetFromConnectOptions(
+    options: ConnectBrowserOptions,
+  ): ResolvedBrowserTarget {
+    const incognito = Boolean(options.incognito);
+    const isolated =
+      options.isolated ?? (incognito && options.userDataDir === undefined);
+    return {
+      wsEndpoint: options.wsEndpoint,
+      browserUrl: options.browserUrl,
+      wsHeaders: options.wsHeaders,
+      autoConnect: Boolean(options.autoConnect),
+      userDataDir: options.userDataDir,
+      channel: options.channel ?? this.#config.resolved.channel,
+      isolated,
+      incognito,
+      headless: options.headless ?? Boolean(this.#config.resolved.headless),
+    };
+  }
+
+  #installBrowser(browser: Browser, mode: 'launched' | 'connected'): void {
+    this.#browserMode = mode;
+    this.#browser = browser;
+    browser.once('disconnected', () => this.#evictIfCurrent(browser));
+  }
+
+  async #openBrowser(
+    target: ResolvedBrowserTarget,
+  ): Promise<{browser: Browser; mode: 'launched' | 'connected'}> {
+    if (target.browserUrl || target.wsEndpoint || target.autoConnect) {
+      return {
+        browser: await this.#connect(target),
+        mode: 'connected',
+      };
+    }
+    return {
+      browser: await this.#launch(target),
+      mode: 'launched',
+    };
+  }
+
+  /**
+   * Dynamically switches (or initially establishes) the active browser handle
+   * to `options`, syncing caller state via `onSwitched` before tearing down the
+   * superseded browser (unless reconnecting to the exact same `wsEndpoint`,
+   * where the prior transport is disconnected first so proxy cleanup completes
+   * before re-attaching).
+   */
+  async connectBrowser(
+    options: ConnectBrowserOptions,
+    onSwitched?: (browser: Browser) => Promise<void> | void,
+  ): Promise<Browser> {
+    validateConnectBrowserOptions(options);
+    if (this.#closingCount > 0) {
+      throw new Error('Browser was closed while initializing.');
+    }
+    const attempt = this.#browserAttempt;
+    using guard = await this.#mutex.acquire();
+    if (this.#closingCount > 0) {
+      throw new Error('Browser was closed while initializing.');
+    }
+    if (this.#browserAttempt !== attempt) {
+      throw new Error('Connection attempt was abandoned before it completed.');
+    }
+
+    const currentTarget = this.#effectiveTarget();
+    const nextTarget = this.#targetFromConnectOptions(options);
+    const sameWsTarget = Boolean(
+      this.#browser?.connected &&
+      this.#browserMode === 'connected' &&
+      nextTarget.wsEndpoint &&
+      currentTarget.wsEndpoint === nextTarget.wsEndpoint &&
+      headersEqual(currentTarget.wsHeaders, nextTarget.wsHeaders),
+    );
+
+    const previousBrowser = this.#browser;
+    const previousMode = this.#browserMode;
+    if (sameWsTarget) {
+      this.#browser = undefined;
+      this.#browserMode = undefined;
+      await this.#teardownBrowserHandle(previousBrowser, previousMode);
+    }
+
+    const opened = await this.#openBrowser(nextTarget);
+    if (this.#closingCount > 0 || this.#browserAttempt !== attempt) {
+      const reason =
+        this.#closingCount > 0
+          ? 'Browser was closed while initializing.'
+          : 'Connection attempt was abandoned before it completed.';
+      await this.#teardownBrowserHandle(opened.browser, opened.mode);
+      throw new Error(reason);
+    }
+
+    this.#installBrowser(opened.browser, opened.mode);
+    this.#activeTarget = nextTarget;
+    try {
+      await onSwitched?.(opened.browser);
+    } catch (err) {
+      if (this.#browser === opened.browser) {
+        this.#browser = undefined;
+        this.#browserMode = undefined;
+      }
+      await this.#teardownBrowserHandle(opened.browser, opened.mode);
+      if (
+        !sameWsTarget &&
+        previousBrowser &&
+        previousBrowser !== opened.browser
+      ) {
+        await this.#teardownBrowserHandle(previousBrowser, previousMode);
+      }
+      throw err;
+    }
+
+    if (
+      !sameWsTarget &&
+      previousBrowser &&
+      previousBrowser !== opened.browser
+    ) {
+      await this.#teardownBrowserHandle(previousBrowser, previousMode);
+    }
+    return opened.browser;
+  }
+
+  async #initBrowser(): Promise<Browser> {
+    const opened = await this.#openBrowser(this.#effectiveTarget());
+    this.#installBrowser(opened.browser, opened.mode);
+    return opened.browser;
+  }
+
+  async #launch(target: ResolvedBrowserTarget): Promise<Browser> {
     const {
-      channel,
       executablePath,
-      headless,
-      isolated = false,
       categoryExtensions: enableExtensions,
       viaCli,
       viewport,
@@ -355,13 +595,20 @@ export class BrowserManager {
       ignoreDefaultChromeArg,
       proxyServer,
     } = this.#config.resolved;
+    const {
+      channel,
+      headless,
+      isolated,
+      incognito,
+      userDataDir: targetUserDataDir,
+    } = target;
 
     const profileDirName =
       channel && channel !== 'stable'
         ? `chrome-profile-${channel}`
         : 'chrome-profile';
 
-    let userDataDir = this.#config.resolved.userDataDir;
+    let userDataDir = targetUserDataDir;
     if (!isolated && !userDataDir) {
       userDataDir = path.join(
         os.homedir(),
@@ -379,6 +626,9 @@ export class BrowserManager {
     ];
     if (proxyServer) {
       args.push(`--proxy-server=${proxyServer}`);
+    }
+    if (incognito && !args.includes('--incognito')) {
+      args.push('--incognito');
     }
     args.push('--hide-crash-restore-bubble');
 
@@ -440,11 +690,7 @@ export class BrowserManager {
           contentHeight: viewport.height,
         });
       }
-      this.#browserMode = 'launched';
-      this.#browser = browser;
-      const launched = browser;
-      launched.once('disconnected', () => this.#evictIfCurrent(launched));
-      return launched;
+      return browser;
     } catch (error) {
       await browser?.close().catch(() => {
         // Best-effort cleanup if post-launch setup failed.
@@ -576,19 +822,21 @@ export class BrowserManager {
     }
   }
 
-  async #connect(): Promise<Browser> {
+  async #connect(target: ResolvedBrowserTarget): Promise<Browser> {
+    const {
+      blockedUrlPattern: blocklist,
+      allowedUrlPattern: allowlist,
+      categoryExtensions: enableExtensions,
+    } = this.#config.resolved;
     const {
       browserUrl: browserURL,
       wsEndpoint,
       wsHeaders,
       autoConnect: isAutoConnect,
       userDataDir,
-      blockedUrlPattern: blocklist,
-      allowedUrlPattern: allowlist,
-      categoryExtensions: enableExtensions,
-    } = this.#config.resolved;
+    } = target;
     // Important: only pass channel, if autoConnect is true.
-    const channel = isAutoConnect ? this.#config.resolved.channel : undefined;
+    const channel = isAutoConnect ? target.channel : undefined;
 
     const connectOptions: ConnectOptions = {
       targetFilter: BrowserManager.makeTargetFilter(enableExtensions),
@@ -599,7 +847,8 @@ export class BrowserManager {
       logger: puppeteerLogger,
     };
 
-    const autoConnect = !wsEndpoint && !browserURL && !!(channel || userDataDir);
+    const autoConnect =
+      !wsEndpoint && !browserURL && !!(channel || userDataDir);
     if (!wsEndpoint && !browserURL && !autoConnect) {
       throw new Error(
         'Either browserURL, wsEndpoint, channel or userDataDir must be provided',
@@ -715,9 +964,6 @@ export class BrowserManager {
         transport: handle.transport,
       });
       logger?.('Connected Puppeteer');
-      this.#browserMode = 'connected';
-      this.#browser = connected;
-      connected.once('disconnected', () => this.#evictIfCurrent(connected));
       return connected;
     } catch (err) {
       handle?.terminate();
@@ -819,11 +1065,10 @@ export class BrowserManager {
     }
   }
 
-  async #closeBrowser(): Promise<void> {
-    const browser = this.#browser;
-    const mode = this.#browserMode;
-    this.#browser = undefined;
-    this.#browserMode = undefined;
+  async #teardownBrowserHandle(
+    browser: Browser | undefined,
+    mode: 'launched' | 'connected' | undefined,
+  ): Promise<void> {
     if (!browser || !browser.connected) {
       return;
     }
@@ -834,6 +1079,14 @@ export class BrowserManager {
     await browser.disconnect().catch(err => {
       logger?.('Failed to disconnect from browser', err);
     });
+  }
+
+  async #closeBrowser(): Promise<void> {
+    const browser = this.#browser;
+    const mode = this.#browserMode;
+    this.#browser = undefined;
+    this.#browserMode = undefined;
+    await this.#teardownBrowserHandle(browser, mode);
   }
 
   /**

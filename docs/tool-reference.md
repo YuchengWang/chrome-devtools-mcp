@@ -2,7 +2,8 @@
 
 # Chrome DevTools MCP Tool Reference
 
-- **[Input automation](#input-automation)** (10 tools)
+- **[Input automation](#input-automation)** (11 tools)
+  - [`batch_actions`](#batch_actions)
   - [`click`](#click)
   - [`drag`](#drag)
   - [`fill`](#fill)
@@ -13,8 +14,9 @@
   - [`type_text`](#type_text)
   - [`upload_file`](#upload_file)
   - [`click_at`](#click_at)
-- **[Navigation automation](#navigation-automation)** (6 tools)
+- **[Navigation automation](#navigation-automation)** (7 tools)
   - [`close_page`](#close_page)
+  - [`connect_browser`](#connect_browser)
   - [`list_pages`](#list_pages)
   - [`navigate_page`](#navigate_page)
   - [`new_page`](#new_page)
@@ -30,7 +32,8 @@
 - **[Network](#network)** (2 tools)
   - [`get_network_request`](#get_network_request)
   - [`list_network_requests`](#list_network_requests)
-- **[Debugging](#debugging)** (10 tools)
+- **[Debugging](#debugging)** (11 tools)
+  - [`diagnose_page_load`](#diagnose_page_load)
   - [`evaluate_script`](#evaluate_script)
   - [`get_console_message`](#get_console_message)
   - [`get_css_styles`](#get_css_styles)
@@ -80,6 +83,20 @@
   - [`configure_webauthn`](#configure_webauthn)
 
 ## Input automation
+
+### `batch_actions`
+
+**Description:** Execute a sequence of page actions ([`navigate_page`](#navigate_page), [`click`](#click), [`fill`](#fill), [`wait_for`](#wait_for), [`evaluate_script`](#evaluate_script)) atomically under the page lock, with an optional final [`take_snapshot`](#take_snapshot).
+
+**Parameters:**
+
+- **actions** (array) **(required)**: Ordered list of actions to execute sequentially.
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **includeSnapshot** (boolean) _(optional)_: Whether to include a [`take_snapshot`](#take_snapshot) after all actions finish. Default is false.
+- **snapshotOptions** (object) _(optional)_: Optional parameters passed to the final [`take_snapshot`](#take_snapshot).
+- **stopOnError** (boolean) _(optional)_: Whether to stop executing remaining actions if one fails. Default is true.
+
+---
 
 ### `click`
 
@@ -216,6 +233,24 @@
 **Parameters:**
 
 - **pageId** (number) **(required)**: The ID of the page to close. Call [`list_pages`](#list_pages) to list pages.
+
+---
+
+### `connect_browser`
+
+**Description:** Dynamically connect or hot-switch to another Chrome browser instance at runtime without restarting chrome-devtools-mcp. Supports attaching via wsEndpoint (such as a local proxy from cua-ycwang:browser_prepare), browserUrl, or autoConnect/userDataDir, or launching an isolated/incognito Chrome instance.
+
+**Parameters:**
+
+- **autoConnect** (boolean) _(optional)_: Attach automatically via DevToolsActivePort using channel or userDataDir.
+- **browserUrl** (string) _(optional)_: HTTP/HTTPS remote debugging URL (e.g., http://127.0.0.1:9222) to attach to.
+- **channel** (enum: "canary", "dev", "beta", "stable") _(optional)_: Chrome release channel when using autoConnect or launching.
+- **headless** (boolean) _(optional)_: Override headless mode when launching an isolated browser.
+- **incognito** (boolean) _(optional)_: Launch the browser window in incognito mode (--incognito). Defaults isolated=true when userDataDir is omitted.
+- **isolated** (boolean) _(optional)_: Launch a separate Chrome instance using a clean temporary profile that is cleaned up on switch/shutdown.
+- **userDataDir** (string) _(optional)_: User data directory to attach to (with autoConnect=true) or launch with.
+- **wsEndpoint** (string) _(optional)_: WebSocket endpoint (ws:// or wss://) to connect to, such as the restricted local loopback proxy ws_endpoint returned by cua-ycwang:browser_prepare.
+- **wsHeaders** (string) _(optional)_: Optional JSON object string of custom headers when connecting via wsEndpoint or browserUrl.
 
 ---
 
@@ -386,6 +421,19 @@
 
 ## Debugging
 
+### `diagnose_page_load`
+
+**Description:** Diagnoses page load failures, network/proxy errors, SSL/TLS issues, CORS/CSP blocks, auth redirects, rate limits, anti-bot/CAPTCHA gates, and slow resource timings on the selected page.
+
+**Parameters:**
+
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **focusUrlPattern** (string) _(optional)_: Optional substring or wildcard (`*`) pattern to focus diagnostics on matching URLs.
+- **includePreservedRequests** (boolean) _(optional)_: Whether to include preserved requests and console messages from recent navigations. Default is true.
+- **includeTimingSummary** (boolean) _(optional)_: Whether to collect navigation timing and top 5 slowest resources via performance.getEntriesByType. Default is true.
+
+---
+
 ### `evaluate_script`
 
 **Description:** Evaluate JavaScript inside the target page or service worker. The source can be provided inline or loaded from a local file. Returns the response as JSON, so returned values have to be JSON-serializable.
@@ -508,6 +556,7 @@ Results are paginated (10 entries per page by default); use pageIdx to page thro
 - **filePath** (string) _(optional)_: The absolute path, or a path relative to the current working directory, to save the screenshot to instead of attaching it to the response.
 - **format** (enum: "png", "jpeg", "webp") _(optional)_: Type of format to save the screenshot as. Default is "png"
 - **fullPage** (boolean) _(optional)_: If set to true takes a screenshot of the full page instead of the currently visible viewport. Incompatible with uid.
+- **inline** (boolean) _(optional)_: If true, attach the screenshot as base64 image content in the response. Default is false (saves to a temporary file and returns path + dimensions).
 - **omitBackground** (boolean) _(optional)_: Hide the default white background, allowing transparent PNG and WebP screenshots. Does not remove CSS backgrounds. Ignored for JPEG.
 - **quality** (number) _(optional)_: Compression quality for JPEG and WebP formats (0-100). Higher values mean better quality but larger file sizes. Ignored for PNG format.
 - **uid** (string) _(optional)_: The uid of an element on the page from the page content snapshot. If omitted, takes a page screenshot.
@@ -524,6 +573,12 @@ in the DevTools Elements panel (if any).
 
 - **pageId** (number) **(required)**: Targets a specific page by ID.
 - **filePath** (string) _(optional)_: The absolute path, or a path relative to the current working directory, to save the snapshot to instead of attaching it to the response.
+- **formsOnly** (boolean) _(optional)_: If true, filter to form controls and action buttons while excluding normal navigation links.
+- **interactiveOnly** (boolean) _(optional)_: If true, prune non-interactive wrapper nodes while preserving interactive elements.
+- **maxDepth** (integer) _(optional)_: Optional maximum tree depth to include relative to the root node.
+- **outlineOnly** (boolean) _(optional)_: If true, return only RootWebArea, landmarks, and headings with subtree node counts.
+- **roles** (array) _(optional)_: Optional list of ARIA roles (case-insensitive) to filter snapshot nodes.
+- **rootUid** (string) _(optional)_: Optional uid of a subtree root node to format instead of the full page snapshot.
 - **verbose** (boolean) _(optional)_: Whether to include all possible information available in the full a11y tree. Default is false.
 
 ---

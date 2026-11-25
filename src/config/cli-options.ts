@@ -87,6 +87,51 @@ export const commands: Commands = {
       },
     },
   },
+  batch_actions: {
+    description:
+      'Execute a sequence of page actions (navigate_page, click, fill, wait_for, evaluate_script) atomically under the page lock, with an optional final take_snapshot.',
+    category: 'Input automation',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      actions: {
+        name: 'actions',
+        type: 'array',
+        description: 'Ordered list of actions to execute sequentially.',
+        required: true,
+        positional: true,
+        minItems: 1,
+      },
+      includeSnapshot: {
+        name: 'includeSnapshot',
+        type: 'boolean',
+        description:
+          'Whether to include a take_snapshot after all actions finish. Default is false.',
+        required: false,
+        positional: false,
+      },
+      snapshotOptions: {
+        name: 'snapshotOptions',
+        type: 'object',
+        description: 'Optional parameters passed to the final take_snapshot.',
+        required: false,
+        positional: false,
+      },
+      stopOnError: {
+        name: 'stopOnError',
+        type: 'boolean',
+        description:
+          'Whether to stop executing remaining actions if one fails. Default is true.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
   click: {
     description: 'Clicks on the provided element',
     category: 'Input automation',
@@ -312,6 +357,126 @@ export const commands: Commands = {
           'Whether user verification succeeds. Set to false to test a failed verification. Default: true.',
         required: false,
         positional: false,
+      },
+    },
+  },
+  connect_browser: {
+    description:
+      'Dynamically connect or hot-switch to another Chrome browser instance at runtime without restarting chrome-devtools-mcp. Supports attaching via wsEndpoint (such as a local proxy from cua-ycwang:browser_prepare), browserUrl, or autoConnect/userDataDir, or launching an isolated/incognito Chrome instance.',
+    category: 'Navigation automation',
+    args: {
+      wsEndpoint: {
+        name: 'wsEndpoint',
+        type: 'string',
+        description:
+          'WebSocket endpoint (ws:// or wss://) to connect to, such as the restricted local loopback proxy ws_endpoint returned by cua-ycwang:browser_prepare.',
+        required: false,
+        positional: false,
+      },
+      browserUrl: {
+        name: 'browserUrl',
+        type: 'string',
+        description:
+          'HTTP/HTTPS remote debugging URL (e.g., http://127.0.0.1:9222) to attach to.',
+        required: false,
+        positional: false,
+      },
+      wsHeaders: {
+        name: 'wsHeaders',
+        type: 'string',
+        description:
+          'Optional JSON object string of custom headers when connecting via wsEndpoint or browserUrl.',
+        required: false,
+        positional: false,
+      },
+      autoConnect: {
+        name: 'autoConnect',
+        type: 'boolean',
+        description:
+          'Attach automatically via DevToolsActivePort using channel or userDataDir.',
+        required: false,
+        positional: false,
+      },
+      userDataDir: {
+        name: 'userDataDir',
+        type: 'string',
+        description:
+          'User data directory to attach to (with autoConnect=true) or launch with.',
+        required: false,
+        positional: false,
+      },
+      channel: {
+        name: 'channel',
+        type: 'string',
+        description:
+          'Chrome release channel when using autoConnect or launching.',
+        required: false,
+        positional: false,
+        enum: ['canary', 'dev', 'beta', 'stable'],
+      },
+      isolated: {
+        name: 'isolated',
+        type: 'boolean',
+        description:
+          'Launch a separate Chrome instance using a clean temporary profile that is cleaned up on switch/shutdown.',
+        required: false,
+        positional: false,
+      },
+      incognito: {
+        name: 'incognito',
+        type: 'boolean',
+        description:
+          'Launch the browser window in incognito mode (--incognito). Defaults isolated=true when userDataDir is omitted.',
+        required: false,
+        positional: false,
+      },
+      headless: {
+        name: 'headless',
+        type: 'boolean',
+        description:
+          'Override headless mode when launching an isolated browser.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  diagnose_page_load: {
+    description:
+      'Diagnoses page load failures, network/proxy errors, SSL/TLS issues, CORS/CSP blocks, auth redirects, rate limits, anti-bot/CAPTCHA gates, and slow resource timings on the selected page.',
+    category: 'Debugging',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      includePreservedRequests: {
+        name: 'includePreservedRequests',
+        type: 'boolean',
+        description:
+          'Whether to include preserved requests and console messages from recent navigations. Default is true.',
+        required: false,
+        positional: false,
+        default: true,
+      },
+      focusUrlPattern: {
+        name: 'focusUrlPattern',
+        type: 'string',
+        description:
+          'Optional substring or wildcard (`*`) pattern to focus diagnostics on matching URLs.',
+        required: false,
+        positional: false,
+      },
+      includeTimingSummary: {
+        name: 'includeTimingSummary',
+        type: 'boolean',
+        description:
+          'Whether to collect navigation timing and top 5 slowest resources via performance.getEntriesByType. Default is true.',
+        required: false,
+        positional: false,
+        default: true,
       },
     },
   },
@@ -2167,6 +2332,14 @@ export const commands: Commands = {
         required: false,
         positional: false,
       },
+      inline: {
+        name: 'inline',
+        type: 'boolean',
+        description:
+          'If true, attach the screenshot as base64 image content in the response. Default is false (saves to a temporary file and returns path + dimensions).',
+        required: false,
+        positional: false,
+      },
     },
   },
   take_snapshot: {
@@ -2194,6 +2367,54 @@ export const commands: Commands = {
         type: 'string',
         description:
           'The absolute path, or a path relative to the current working directory, to save the snapshot to instead of attaching it to the response.',
+        required: false,
+        positional: false,
+      },
+      rootUid: {
+        name: 'rootUid',
+        type: 'string',
+        description:
+          'Optional uid of a subtree root node to format instead of the full page snapshot.',
+        required: false,
+        positional: false,
+      },
+      maxDepth: {
+        name: 'maxDepth',
+        type: 'integer',
+        description:
+          'Optional maximum tree depth to include relative to the root node.',
+        required: false,
+        positional: false,
+      },
+      interactiveOnly: {
+        name: 'interactiveOnly',
+        type: 'boolean',
+        description:
+          'If true, prune non-interactive wrapper nodes while preserving interactive elements.',
+        required: false,
+        positional: false,
+      },
+      roles: {
+        name: 'roles',
+        type: 'array',
+        description:
+          'Optional list of ARIA roles (case-insensitive) to filter snapshot nodes.',
+        required: false,
+        positional: false,
+      },
+      formsOnly: {
+        name: 'formsOnly',
+        type: 'boolean',
+        description:
+          'If true, filter to form controls and action buttons while excluding normal navigation links.',
+        required: false,
+        positional: false,
+      },
+      outlineOnly: {
+        name: 'outlineOnly',
+        type: 'boolean',
+        description:
+          'If true, return only RootWebArea, landmarks, and headings with subtree node counts.',
         required: false,
         positional: false,
       },

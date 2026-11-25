@@ -14,7 +14,11 @@ import {describe, it} from 'node:test';
 
 import sinon from 'sinon';
 
-import {BrowserManager, connectTransport} from '../src/BrowserManager.js';
+import {
+  BrowserManager,
+  connectTransport,
+  validateConnectBrowserOptions,
+} from '../src/BrowserManager.js';
 import {
   puppeteer,
   type Browser,
@@ -27,7 +31,7 @@ import {
   createMockServerConfig,
 } from './mocks.js';
 import {serverHooks} from './server.js';
-import {getExecutablePath} from './utils.js';
+import {createTempDir, getExecutablePath} from './utils.js';
 
 async function safeClose(browser: Browser) {
   try {
@@ -1478,6 +1482,214 @@ describe('browser', () => {
         filterWithoutExtensions(mockTarget('about:blank')),
         true,
       );
+    });
+  });
+
+  describe('connectBrowser dynamic hot-switching', () => {
+    it('validates conflicting and empty connection options', () => {
+      assert.throws(() => validateConnectBrowserOptions({}), /at least one/);
+      assert.throws(
+        () =>
+          validateConnectBrowserOptions({
+            wsEndpoint: 'ws://127.0.0.1:1/devtools/browser/a',
+            browserUrl: 'http://127.0.0.1:9222',
+          }),
+        /mutually exclusive/,
+      );
+      assert.throws(
+        () =>
+          validateConnectBrowserOptions({
+            wsHeaders: {'X-Test': '1'},
+          }),
+        /at least one/,
+      );
+      assert.throws(
+        () =>
+          validateConnectBrowserOptions({
+            isolated: true,
+            wsHeaders: {'X-Test': '1'},
+          }),
+        /wsHeaders can only be used/,
+      );
+      assert.throws(
+        () =>
+          validateConnectBrowserOptions({
+            wsEndpoint: 'http://127.0.0.1:9222',
+          }),
+        /ws:\/\/ or wss:\/\//,
+      );
+      assert.throws(
+        () =>
+          validateConnectBrowserOptions({
+            isolated: true,
+            userDataDir: '/tmp/profile',
+          }),
+        /userDataDir cannot be combined with isolated/,
+      );
+      assert.throws(
+        () =>
+          validateConnectBrowserOptions({
+            wsEndpoint: 'ws://127.0.0.1:1/devtools/browser/a',
+            isolated: true,
+          }),
+        /Launch options/,
+      );
+    });
+
+    it('hot-switches across wsEndpoint targets, runs onSwitched before tearing down old connection, and launches isolated incognito', async () => {
+      const browser1 = createMockPuppeteerBrowser();
+      const browser2 = createMockPuppeteerBrowser();
+      const browser3 = createMockPuppeteerBrowser();
+      const {createStub} = stubConnectTransport();
+      const connectStub = sinon.stub(puppeteer, 'connect');
+      connectStub.onFirstCall().resolves(browser1);
+      connectStub.onSecondCall().resolves(browser2);
+      const launchStub = sinon.stub(puppeteer, 'launch').resolves(browser3);
+
+      const manager = new BrowserManager(createMockServerConfig());
+      const events: string[] = [];
+
+      // 1. Attach first wsEndpoint.
+      await manager.connectBrowser(
+        {
+          wsEndpoint: 'ws://127.0.0.1:10001/devtools/browser/tok1',
+          wsHeaders: {'X-Auth': 'one'},
+        },
+        () => {
+          events.push('switched-1');
+        },
+      );
+      assert.strictEqual(
+        createStub.firstCall.args[0],
+        'ws://127.0.0.1:10001/devtools/browser/tok1',
+      );
+      assert.deepStrictEqual(createStub.firstCall.args[1], {'X-Auth': 'one'});
+      assert.deepStrictEqual(events, ['switched-1']);
+
+      // 2. Hot-switch to second profile wsEndpoint; browser1 stays connected until after switched-2.
+      browser1.disconnect.callsFake(async () => {
+        events.push('disconnected-1');
+      });
+      await manager.connectBrowser(
+        {wsEndpoint: 'ws://127.0.0.1:10002/devtools/browser/tok2'},
+        () => {
+          assert.strictEqual(browser1.disconnect.callCount, 0);
+          events.push('switched-2');
+        },
+      );
+      assert.strictEqual(
+        createStub.secondCall.args[0],
+        'ws://127.0.0.1:10002/devtools/browser/tok2',
+      );
+      assert.deepStrictEqual(events, [
+        'switched-1',
+        'switched-2',
+        'disconnected-1',
+      ]);
+      sinon.assert.notCalled(browser1.close);
+
+      // 3. Hot-switch to ephemeral incognito isolated launch, disconnecting browser2.
+      await manager.connectBrowser({isolated: true, incognito: true});
+      sinon.assert.calledOnce(launchStub);
+      const launchOpts = launchStub.firstCall.args[0];
+      assert.ok(launchOpts?.args?.includes('--incognito'));
+      assert.strictEqual(launchOpts?.userDataDir, undefined);
+      sinon.assert.calledOnce(browser2.disconnect);
+
+      // 4. Subsequent close() shuts down the launched incognito browser via close().
+      await manager.close();
+      sinon.assert.calledOnce(browser3.close);
+    });
+
+    it('preserves active browser when hot-switching to an unreachable endpoint fails', async () => {
+      const browser1 = createMockPuppeteerBrowser();
+      const {createStub, transport} = stubConnectTransport();
+      sinon.stub(puppeteer, 'connect').resolves(browser1);
+      createStub.onFirstCall().resolves({transport, terminate: sinon.stub()});
+      createStub.onSecondCall().rejects(new Error('ECONNREFUSED'));
+
+      const manager = new BrowserManager(createMockServerConfig());
+      await manager.connectBrowser({
+        wsEndpoint: 'ws://127.0.0.1:10001/devtools/browser/tok1',
+      });
+
+      await assert.rejects(
+        manager.connectBrowser({
+          wsEndpoint: 'ws://127.0.0.1:19999/devtools/browser/bad',
+        }),
+        /Could not connect to Chrome/,
+      );
+
+      // browser1 remains alive and cached for subsequent ensureBrowser().
+      sinon.assert.notCalled(browser1.disconnect);
+      assert.strictEqual(await manager.ensureBrowser(), browser1);
+      await manager.close();
+    });
+
+    it('disconnects prior connection before re-attaching when targeting the exact same wsEndpoint', async () => {
+      const browser1 = createMockPuppeteerBrowser();
+      const browser2 = createMockPuppeteerBrowser();
+      const {createStub} = stubConnectTransport();
+      const connectStub = sinon.stub(puppeteer, 'connect');
+      connectStub.onFirstCall().resolves(browser1);
+      connectStub.onSecondCall().resolves(browser2);
+
+      const events: string[] = [];
+      browser1.disconnect.callsFake(async () => {
+        events.push('disconnect-old');
+      });
+      createStub.callsFake(async () => {
+        events.push('dial-new');
+        return {
+          transport: {send: sinon.stub(), close: sinon.stub()},
+          terminate: sinon.stub(),
+        };
+      });
+
+      const manager = new BrowserManager(createMockServerConfig());
+      const url = 'ws://127.0.0.1:10001/devtools/browser/same';
+      await manager.connectBrowser({wsEndpoint: url});
+      await manager.connectBrowser({wsEndpoint: url});
+
+      assert.deepStrictEqual(events, [
+        'dial-new',
+        'disconnect-old',
+        'dial-new',
+      ]);
+      await manager.close();
+    });
+
+    it('connects dynamically via browserUrl and autoConnect+userDataDir', async () => {
+      const browser1 = createMockPuppeteerBrowser();
+      const browser2 = createMockPuppeteerBrowser();
+      const {createStub} = stubConnectTransport();
+      stubBrowserUrlFetch('ws://127.0.0.1:9333/devtools/browser/from-http');
+      const connectStub = sinon.stub(puppeteer, 'connect');
+      connectStub.onFirstCall().resolves(browser1);
+      connectStub.onSecondCall().resolves(browser2);
+
+      using tempDir = createTempDir('cdm-connect-');
+      fs.writeFileSync(
+        path.join(tempDir.path, 'DevToolsActivePort'),
+        '9444\n/devtools/browser/from-dir\n',
+      );
+      const manager = new BrowserManager(createMockServerConfig());
+      await manager.connectBrowser({browserUrl: 'http://127.0.0.1:9333'});
+      assert.strictEqual(
+        createStub.firstCall.args[0],
+        'ws://127.0.0.1:9333/devtools/browser/from-http',
+      );
+
+      await manager.connectBrowser({
+        autoConnect: true,
+        userDataDir: tempDir.path,
+      });
+      assert.strictEqual(
+        createStub.secondCall.args[0],
+        'ws://127.0.0.1:9444/devtools/browser/from-dir',
+      );
+      sinon.assert.calledOnce(browser1.disconnect);
+      await manager.close();
     });
   });
 });

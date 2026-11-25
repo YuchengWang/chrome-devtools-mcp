@@ -80,6 +80,7 @@ ts_library("tests") {
     "telemetry/watchdog/main.test.ts",
     "third_party_notices.test.ts",
     "tools/batch.test.ts",
+    "tools/browser.test.ts",
     "tools/comments.test.ts",
     "tools/console.test.ts",
     "tools/css.test.ts",

@@ -372,3 +372,68 @@ export function validateUrl(url: string, options: ValidateUrlOptions): URL {
 
   return parsed;
 }
+
+export function validateBrowserUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Provided browserUrl ${url} is not valid URL.`);
+  }
+  // `new URL('localhost:9222')` parses with the scheme `localhost:`, but
+  // the browser URL is fetched over HTTP to discover the WebSocket
+  // endpoint, so only http: and https: can work.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `Provided browserUrl ${url} must use http:// or https:// protocol.`,
+    );
+  }
+  return url;
+}
+
+export function validateWsEndpoint(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') {
+      throw new Error(
+        `Provided wsEndpoint ${url} must use ws:// or wss:// protocol.`,
+      );
+    }
+    return url;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('ws://')) {
+      throw error;
+    }
+    throw new Error(`Provided wsEndpoint ${url} is not valid URL.`);
+  }
+}
+
+export function parseWsHeaders(
+  val: unknown,
+): Record<string, string> | undefined {
+  if (!val) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = typeof val === 'string' ? JSON.parse(val) : val;
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error('Headers must be a JSON object');
+    }
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value !== 'string') {
+        throw new Error(`Header "${key}" must have a string value`);
+      }
+      headers[key] = value;
+    }
+    return headers;
+  } catch (error) {
+    throw new Error(
+      `Invalid JSON for wsHeaders: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}

@@ -53,6 +53,7 @@ import type {
   TextSnapshotNode,
   GeolocationOptions,
   CD4ACommentThread,
+  ConnectBrowserOptions,
   PaginationOptions,
   ForcedColors,
   PrefersContrast,
@@ -493,6 +494,7 @@ export type BrowserlessContext = Readonly<{
     filePath: string,
     options: HeapQueryOptions,
   ): Promise<DevTools.HeapSnapshotModel.HeapSnapshotModel.ItemsRange>;
+  connectBrowser(options: ConnectBrowserOptions): Promise<unknown>;
 }>;
 
 export type MatchedStyles = DevTools.CSSMatchedStyles.CSSMatchedStyles;

@@ -84,6 +84,18 @@ export type CD4ABridge = Omit<
 export type CommentThread = CD4ACommentThread;
 export type RevealTarget = CD4ARevealTarget;
 
+export interface ConnectBrowserOptions {
+  wsEndpoint?: string;
+  browserUrl?: string;
+  wsHeaders?: Record<string, string>;
+  autoConnect?: boolean;
+  userDataDir?: string;
+  channel?: 'canary' | 'dev' | 'beta' | 'stable';
+  isolated?: boolean;
+  incognito?: boolean;
+  headless?: boolean;
+}
+
 declare global {
   interface Window {
     universe?: {

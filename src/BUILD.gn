@@ -236,6 +236,7 @@ ts_library("mcp_lib") {
     "telemetry/watchdog/main.ts",
     "tools/ToolDefinition.ts",
     "tools/batch.ts",
+    "tools/browser.ts",
     "tools/categories.ts",
     "tools/comments.ts",
     "tools/console.ts",

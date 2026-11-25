@@ -1209,7 +1209,7 @@ describe('McpResponse network pagination', () => {
     });
   });
 
-  it('returns all items when pageIdx is 0 without pageSize', async () => {
+  it('enforces default page size of 20 when pageIdx is 0 without pageSize', async () => {
     await withMcpContext(async (response, context) => {
       const requests = Array.from({length: 30}, (_, idx) =>
         getMockRequest({method: `GET-${idx}`}),
@@ -1218,13 +1218,13 @@ describe('McpResponse network pagination', () => {
       response.setIncludeNetworkRequests(true, {pageIdx: 0});
       const {content} = await response.handle(context);
       const text = getTextContent(content[0]);
-      assert.ok(text.includes('Showing 1-30 of 30 (Page 1 of 1).'));
-      assert.ok(!text.includes('Next page:'));
+      assert.ok(text.includes('Showing 1-20 of 30 (Page 1 of 2).'));
+      assert.ok(text.includes('Next page: 1'));
       assert.ok(!text.includes('Previous page:'));
     });
   });
 
-  it('returns all console messages when pageIdx is 0 without pageSize', async () => {
+  it('enforces default page size of 20 for console messages when pageIdx is 0 without pageSize', async () => {
     await withMcpContext(async (response, context) => {
       const messages = Array.from({length: 30}, (_, idx) =>
         createMockConsoleMessage({text: `msg-${idx}`}),
@@ -1233,10 +1233,31 @@ describe('McpResponse network pagination', () => {
       response.setIncludeConsoleData(true, {pageIdx: 0});
       const {content} = await response.handle(context);
       const text = getTextContent(content[0]);
-      assert.ok(text.includes('Showing 1-30 of 30 (Page 1 of 1).'));
-      assert.ok(!text.includes('Next page:'));
+      assert.ok(text.includes('Showing 1-20 of 30 (Page 1 of 2).'));
+      assert.ok(text.includes('Next page: 1'));
       assert.ok(!text.includes('Previous page:'));
     });
+  });
+
+  it('folds responses exceeding 8800 UTF-8 bytes with head-tail truncation and saves full output', async () => {
+    const {context} = createHandlerMocks();
+    const response = new McpResponse(createMockServerConfig());
+    const headMarker = 'HEAD_START_🚀';
+    const tailMarker = 'TAIL_END_🎉';
+    const middle = '中文测试数据'.repeat(1200);
+    response.appendResponseLine(`${headMarker}\n${middle}\n${tailMarker}`);
+
+    const {content} = await response.format(context, {
+      detailedConsoleMessage: undefined,
+      consoleMessages: undefined,
+      snapshot: undefined,
+    });
+    const text = getTextContent(content[0]);
+    assert.ok(Buffer.byteLength(text, 'utf8') <= 8800);
+    assert.ok(text.startsWith(headMarker));
+    assert.ok(text.endsWith(tailMarker));
+    assert.ok(text.includes('/tmp/mcp-response.txt'));
+    sinon.assert.calledOnce(context.saveTemporaryFile);
   });
 
   it('handles invalid page number by showing first page', async t => {

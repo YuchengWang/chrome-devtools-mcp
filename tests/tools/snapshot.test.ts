@@ -37,6 +37,29 @@ describe('snapshot', () => {
         filePath: 'custom/path.txt',
       });
     });
+
+    it('forwards rootUid, maxDepth, and interactiveOnly parameters', async () => {
+      const {page, context, response, args} = createHandlerMocks();
+      await takeSnapshot(args).handler(
+        {
+          params: {
+            rootUid: '1_2',
+            maxDepth: 2,
+            interactiveOnly: true,
+          },
+          page,
+        },
+        response,
+        context,
+      );
+      sinon.assert.calledOnceWithExactly(response.includeSnapshot, {
+        verbose: false,
+        filePath: undefined,
+        rootUid: '1_2',
+        maxDepth: 2,
+        interactiveOnly: true,
+      });
+    });
   });
 
   describe('wait_for', () => {

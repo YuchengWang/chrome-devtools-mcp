@@ -20,6 +20,80 @@ type ScreenshotFormat = 'png' | 'jpeg' | 'webp';
 
 const MAX_CHROMIUM_SCREENSHOT_DIMENSION = 16384;
 
+function getImageDimensions(
+  data: Uint8Array,
+  format: ScreenshotFormat,
+): {width: number; height: number} | undefined {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  if (format === 'png') {
+    if (
+      data.length >= 24 &&
+      data[0] === 0x89 &&
+      data[1] === 0x50 &&
+      data[2] === 0x4e &&
+      data[3] === 0x47
+    ) {
+      return {
+        width: view.getUint32(16, false),
+        height: view.getUint32(20, false),
+      };
+    }
+    return undefined;
+  }
+  if (format === 'jpeg') {
+    let i = 2;
+    while (i + 8 < data.length) {
+      if (data[i] !== 0xff) {
+        i++;
+        continue;
+      }
+      const marker = data[i + 1];
+      if (marker >= 0xc0 && marker <= 0xc3) {
+        return {
+          height: view.getUint16(i + 5, false),
+          width: view.getUint16(i + 7, false),
+        };
+      }
+      if (i + 3 >= data.length) {
+        break;
+      }
+      const len = view.getUint16(i + 2, false);
+      if (len < 2) {
+        break;
+      }
+      i += 2 + len;
+    }
+    return undefined;
+  }
+  if (format === 'webp' && data.length >= 30) {
+    const chunk = String.fromCharCode(
+      data[12],
+      data[13],
+      data[14],
+      data[15],
+    );
+    if (chunk === 'VP8X') {
+      const width = 1 + (data[24] | (data[25] << 8) | (data[26] << 16));
+      const height = 1 + (data[27] | (data[28] << 8) | (data[29] << 16));
+      return {width, height};
+    }
+    if (chunk === 'VP8L') {
+      const bits = view.getUint32(21, true);
+      return {
+        width: (bits & 0x3fff) + 1,
+        height: ((bits >> 14) & 0x3fff) + 1,
+      };
+    }
+    if (chunk === 'VP8 ') {
+      return {
+        width: view.getUint16(26, true) & 0x3fff,
+        height: view.getUint16(28, true) & 0x3fff,
+      };
+    }
+  }
+  return undefined;
+}
+
 type SourceBox = BoundingBox & {
   devicePixelRatio: number;
 };
@@ -198,6 +272,12 @@ export const screenshot: PageToolFactory = definePageTool(
           .describe(
             'The absolute path, or a path relative to the current working directory, to save the screenshot to instead of attaching it to the response.',
           ),
+        inline: zod
+          .boolean()
+          .optional()
+          .describe(
+            'If true, attach the screenshot as base64 image content in the response. Default is false (saves to a temporary file and returns path + dimensions).',
+          ),
       },
       blockedByDialog: true,
       concurrency: 'page',
@@ -313,12 +393,27 @@ export const screenshot: PageToolFactory = definePageTool(
           response.appendResponseLine(
             `Saved screenshot to ${result.filename}.`,
           );
-        } else if (screenshot.length >= 2_000_000) {
+        } else if (!request.params.inline || screenshot.length >= 2_000_000) {
           const {filepath} = await context.saveTemporaryFile(
             screenshot,
             `screenshot${extension}`,
           );
-          response.appendResponseLine(`Saved screenshot to ${filepath}.`);
+          const dims =
+            getImageDimensions(screenshot, format) ??
+            (box
+              ? {
+                  width: Math.round(
+                    box.width * box.devicePixelRatio * (clip?.scale ?? 1),
+                  ),
+                  height: Math.round(
+                    box.height * box.devicePixelRatio * (clip?.scale ?? 1),
+                  ),
+                }
+              : undefined);
+          const dimsText = dims ? ` (${dims.width}x${dims.height})` : '';
+          response.appendResponseLine(
+            `Saved screenshot to ${filepath}${dimsText}.`,
+          );
         } else {
           response.attachImage({
             mimeType: `image/${format}`,

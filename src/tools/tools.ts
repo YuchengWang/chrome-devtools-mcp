@@ -7,9 +7,11 @@
 import {mcpOptions, type ParsedArguments} from '../config/mcp-options.js';
 import type {YargsOptions} from '../third_party/index.js';
 
+import * as batchTools from './batch.js';
 import * as commentsTools from './comments.js';
 import * as consoleTools from './console.js';
 import * as cssTools from './css.js';
+import * as diagnoseTools from './diagnose.js';
 import * as emulationTools from './emulation.js';
 import * as extensionTools from './extensions.js';
 import * as inputTools from './input.js';
@@ -32,9 +34,11 @@ import * as webmcpTools from './webmcp.js';
 
 export const createTools = (args: ParsedArguments): AnyToolDefinition[] => {
   const rawTools = [
+    ...Object.values(batchTools),
     ...Object.values(commentsTools),
     ...Object.values(consoleTools),
     ...Object.values(cssTools),
+    ...Object.values(diagnoseTools),
     ...Object.values(emulationTools),
     ...Object.values(extensionTools),
     ...Object.values(inputTools),

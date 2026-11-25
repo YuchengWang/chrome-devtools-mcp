@@ -8,16 +8,46 @@ import type {TextSnapshot} from '../TextSnapshot.js';
 import type {TextSnapshotNode} from '../types.js';
 import {truncateUrl} from '../utils/text.js';
 
+export interface SnapshotFormatOptions {
+  rootUid?: string;
+  maxDepth?: number;
+  interactiveOnly?: boolean;
+}
+
+const INTERACTIVE_ROLES = new Set([
+  'button',
+  'link',
+  'textbox',
+  'searchbox',
+  'checkbox',
+  'radio',
+  'combobox',
+  'listbox',
+  'option',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'tab',
+  'switch',
+  'slider',
+  'spinbutton',
+  'treeitem',
+  'gridcell',
+  'scrollbar',
+]);
+
 export class SnapshotFormatter {
   #snapshot: TextSnapshot;
+  #options: SnapshotFormatOptions;
 
-  constructor(snapshot: TextSnapshot) {
+  constructor(snapshot: TextSnapshot, options: SnapshotFormatOptions = {}) {
     this.#snapshot = snapshot;
+    this.#options = options;
   }
 
   toString(): string {
     const chunks: string[] = [];
-    const root = this.#snapshot.root;
+    const root = this.#resolveRoot();
 
     // Top-level content of the snapshot.
     if (
@@ -34,7 +64,54 @@ Get a verbose snapshot to include all elements if you are interested in the sele
   }
 
   toJSON(): object {
-    return this.#nodeToJSON(this.#snapshot.root);
+    return this.#nodeToJSON(this.#resolveRoot(), 0);
+  }
+
+  #resolveRoot(): TextSnapshotNode {
+    const root = this.#snapshot.root;
+    if (!this.#options.rootUid) {
+      return root;
+    }
+    const found =
+      this.#snapshot.idToNode?.get(this.#options.rootUid) ??
+      findNodeByUid(root, this.#options.rootUid);
+    if (!found) {
+      throw new Error(
+        `No snapshot node found with uid "${this.#options.rootUid}".`,
+      );
+    }
+    return found;
+  }
+
+  #isInteractiveNode(node: TextSnapshotNode): boolean {
+    if (node.id && node.id === this.#snapshot.selectedElementUid) {
+      return true;
+    }
+    if (node.role && INTERACTIVE_ROLES.has(node.role)) {
+      return true;
+    }
+    if (
+      (node as unknown as Record<string, unknown>).focused !== undefined ||
+      (node as unknown as Record<string, unknown>).editable === true
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  #getEffectiveChildren(node: TextSnapshotNode): TextSnapshotNode[] {
+    if (!this.#options.interactiveOnly) {
+      return node.children;
+    }
+    const result: TextSnapshotNode[] = [];
+    for (const child of node.children) {
+      if (this.#isInteractiveNode(child)) {
+        result.push(child);
+      } else {
+        result.push(...this.#getEffectiveChildren(child));
+      }
+    }
+    return result;
   }
 
   #formatNode(node: TextSnapshotNode, depth = 0): string {
@@ -49,8 +126,15 @@ Get a verbose snapshot to include all elements if you are interested in the sele
       '\n';
     chunks.push(line);
 
+    if (
+      this.#options.maxDepth !== undefined &&
+      depth >= this.#options.maxDepth
+    ) {
+      return chunks.join('');
+    }
+
     if (!this.#hasRedundantTextChildren(node)) {
-      for (const child of node.children) {
+      for (const child of this.#getEffectiveChildren(node)) {
         chunks.push(this.#formatNode(child, depth + 1));
       }
     }
@@ -75,9 +159,14 @@ Get a verbose snapshot to include all elements if you are interested in the sele
     return stripWhitespace(text) === stripWhitespace(node.name);
   }
 
-  #nodeToJSON(node: TextSnapshotNode): object {
+  #nodeToJSON(node: TextSnapshotNode, depth = 0): object {
     const rawAttrs = this.#getAttributesMap(node);
-    const children = node.children.map(child => this.#nodeToJSON(child));
+    const children =
+      this.#options.maxDepth !== undefined && depth >= this.#options.maxDepth
+        ? []
+        : this.#getEffectiveChildren(node).map(child =>
+            this.#nodeToJSON(child, depth + 1),
+          );
     const result: Record<string, unknown> = structuredClone(rawAttrs);
     if (children.length > 0) {
       result.children = children;
@@ -208,4 +297,20 @@ const excludedAttributes = new Set([
 
 function stripWhitespace(text: string): string {
   return text.replace(/\s+/g, '');
+}
+
+function findNodeByUid(
+  node: TextSnapshotNode,
+  uid: string,
+): TextSnapshotNode | undefined {
+  if (node.id === uid) {
+    return node;
+  }
+  for (const child of node.children) {
+    const found = findNodeByUid(child, uid);
+    if (found) {
+      return found;
+    }
+  }
+  return undefined;
 }

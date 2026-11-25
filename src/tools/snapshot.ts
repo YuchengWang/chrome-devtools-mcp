@@ -36,6 +36,26 @@ in the DevTools Elements panel (if any).`,
       .describe(
         'The absolute path, or a path relative to the current working directory, to save the snapshot to instead of attaching it to the response.',
       ),
+    rootUid: zod
+      .string()
+      .optional()
+      .describe(
+        'Optional uid of a subtree root node to format instead of the full page snapshot.',
+      ),
+    maxDepth: zod
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        'Optional maximum tree depth to include relative to the root node.',
+      ),
+    interactiveOnly: zod
+      .boolean()
+      .optional()
+      .describe(
+        'If true, prune non-interactive wrapper nodes while preserving interactive elements.',
+      ),
   },
   blockedByDialog: true,
   concurrency: 'page',
@@ -46,6 +66,15 @@ in the DevTools Elements panel (if any).`,
     response.includeSnapshot({
       verbose: request.params.verbose ?? false,
       filePath: request.params.filePath,
+      ...(request.params.rootUid !== undefined
+        ? {rootUid: request.params.rootUid}
+        : {}),
+      ...(request.params.maxDepth !== undefined
+        ? {maxDepth: request.params.maxDepth}
+        : {}),
+      ...(request.params.interactiveOnly !== undefined
+        ? {interactiveOnly: request.params.interactiveOnly}
+        : {}),
     });
   },
 }));

@@ -10,13 +10,15 @@ import {describe, it} from 'node:test';
 import {paginate} from '../../src/utils/pagination.js';
 
 describe('paginate', () => {
-  it('returns all items when no pagination options are provided', () => {
+  it('enforces default page size of 20 when no pagination options are provided', () => {
     const items = Array.from({length: 25}, (_, i) => `item-${i}`);
     const result = paginate(items);
-    assert.strictEqual(result.items.length, 25);
+    assert.strictEqual(result.items.length, 20);
+    assert.strictEqual(result.items[0], 'item-0');
+    assert.strictEqual(result.items[19], 'item-19');
     assert.strictEqual(result.currentPage, 0);
-    assert.strictEqual(result.totalPages, 1);
-    assert.strictEqual(result.hasNextPage, false);
+    assert.strictEqual(result.totalPages, 2);
+    assert.strictEqual(result.hasNextPage, true);
     assert.strictEqual(result.hasPreviousPage, false);
     assert.strictEqual(result.invalidPage, false);
   });

@@ -547,4 +547,52 @@ describe('snapshotFormatter', () => {
       ],
     });
   });
+
+  it('supports rootUid, maxDepth, and interactiveOnly options', () => {
+    const tree = createNode('1_0', 'RootWebArea', 'Page', [
+      createNode('1_1', 'generic', '', [
+        createNode('1_2', 'paragraph', 'Intro'),
+        createNode('1_3', 'generic', '', [
+          createNode('1_4', 'button', 'Submit'),
+        ]),
+        createNode('1_5', 'link', 'Home', [
+          createNode('1_6', 'StaticText', 'Home'),
+        ]),
+      ]),
+    ]);
+
+    const interactive = new SnapshotFormatter(
+      {root: tree, verbose: false} as TextSnapshot,
+      {interactiveOnly: true},
+    );
+    assert.strictEqual(
+      interactive.toString(),
+      `uid=1_0 RootWebArea "Page"
+  uid=1_4 button "Submit"
+  uid=1_5 link "Home"
+`,
+    );
+
+    const subtreeDepth = new SnapshotFormatter(
+      {root: tree, verbose: false} as TextSnapshot,
+      {rootUid: '1_1', maxDepth: 1},
+    );
+    assert.strictEqual(
+      subtreeDepth.toString(),
+      `uid=1_1 generic
+  uid=1_2 paragraph "Intro"
+  uid=1_3 generic
+  uid=1_5 link "Home"
+`,
+    );
+    assert.deepStrictEqual(subtreeDepth.toJSON(), {
+      id: '1_1',
+      role: 'generic',
+      children: [
+        {id: '1_2', role: 'paragraph', name: 'Intro'},
+        {id: '1_3', role: 'generic'},
+        {id: '1_5', role: 'link', name: 'Home'},
+      ],
+    });
+  });
 });

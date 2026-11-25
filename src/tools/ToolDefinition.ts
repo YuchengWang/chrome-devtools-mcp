@@ -14,6 +14,7 @@ import type {
   HeapEdgesQueryOptions,
   HeapQueryOptions,
 } from '../processors/HeapSnapshotManager.js';
+import type {UncaughtError} from '../collectors/PageCollector.js';
 import type {McpPage} from '../McpPage.js';
 import type {Logpoint, LogpointOptions} from '../utils/logpoint.js';
 import type {DevToolsCommentBridge} from '../devtools/DevToolsCommentBridge.js';
@@ -29,10 +30,12 @@ import type {
 } from '../formatters/HeapSnapshotFormatter.js';
 import {zod, type Flags, type RunnerResult} from '../third_party/index.js';
 import type {
+  ConsoleMessage,
   Dialog,
   ElementHandle,
   Extension,
   GetPWAStateOptions,
+  HTTPRequest,
   InstallPWAOptions,
   LaunchPWAOptions,
   PWAState,
@@ -182,6 +185,9 @@ export interface ImageContentData {
 export interface SnapshotParams {
   verbose?: boolean;
   filePath?: string;
+  rootUid?: string;
+  maxDepth?: number;
+  interactiveOnly?: boolean;
 }
 
 export interface LighthouseAuditNode {
@@ -600,6 +606,10 @@ export type ContextPage = Readonly<{
   mockNetwork(input: NetworkMockInput): Promise<NetworkOverride>;
   listNetworkMocks(filter?: NetworkMockFilter): NetworkOverride[];
   removeNetworkMocks(filter: NetworkMockFilter): Promise<number>;
+  getNetworkRequests(includePreservedRequests?: boolean): HTTPRequest[];
+  getConsoleData(
+    includePreservedMessages?: boolean,
+  ): Array<ConsoleMessage | Error | DevTools.AggregatedIssue | UncaughtError>;
 }>;
 
 export type ToolFactory<Schema extends ToolSchema = ToolSchema> = (

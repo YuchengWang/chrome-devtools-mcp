@@ -240,7 +240,7 @@ describe('screenshot', () => {
         );
         for (const omitBackground of [true, false]) {
           await screenshotTool.handler(
-            {params: {format: 'png', omitBackground}, page},
+            {params: {format: 'png', omitBackground, inline: true}, page},
             response,
             context,
           );
@@ -271,10 +271,11 @@ describe('screenshot', () => {
       });
     });
 
-    it('with default options', async () => {
+    it('with default options saves to temp file with dimensions and no inline image', async () => {
       await withMcpContext(async (response, context) => {
         const fixture = screenshots.basic;
         const page = context.getSelectedMcpPage().pptrPage;
+        await page.setViewport({width: 320, height: 240});
         await page.setContent(fixture.html);
         await screenshotTool.handler(
           {params: {format: 'png'}, page: context.getSelectedMcpPage()},
@@ -282,11 +283,15 @@ describe('screenshot', () => {
           context,
         );
 
-        assert.strictEqual(response.images.length, 1);
-        assert.strictEqual(response.images[0].mimeType, 'image/png');
+        assert.strictEqual(response.images.length, 0);
         assert.strictEqual(
           response.responseLines.at(0),
           "Took a screenshot of the current page's viewport.",
+        );
+        assert.ok(
+          response.responseLines
+            .at(1)
+            ?.match(/^Saved screenshot to .*\.png \(320x240\)\.$/),
         );
       });
     });
@@ -295,7 +300,7 @@ describe('screenshot', () => {
       page.pptrPage.screenshot.resolves(new Uint8Array([1, 2, 3]));
 
       await screenshot(args).handler(
-        {params: {format: 'png', quality: 0}, page},
+        {params: {format: 'png', quality: 0, inline: true}, page},
         response,
         context,
       );
@@ -321,7 +326,7 @@ describe('screenshot', () => {
       page.pptrPage.screenshot.resolves(new Uint8Array([1, 2, 3]));
 
       await screenshot(args).handler(
-        {params: {format: 'jpeg'}, page},
+        {params: {format: 'jpeg', inline: true}, page},
         response,
         context,
       );
@@ -367,7 +372,7 @@ describe('screenshot', () => {
       page.pptrPage.screenshot.resolves(new Uint8Array([1, 2, 3]));
 
       await screenshot(args).handler(
-        {params: {format: 'webp'}, page},
+        {params: {format: 'webp', inline: true}, page},
         response,
         context,
       );
@@ -395,7 +400,7 @@ describe('screenshot', () => {
         await page.setContent(fixture.html);
         await screenshotTool.handler(
           {
-            params: {format: 'png', fullPage: true},
+            params: {format: 'png', fullPage: true, inline: true},
             page: context.getSelectedMcpPage(),
           },
           response,
@@ -430,7 +435,7 @@ describe('screenshot', () => {
 
         await screenshotTool.handler(
           {
-            params: {format: 'png', fullPage: true},
+            params: {format: 'png', fullPage: true, inline: true},
             page: context.getSelectedMcpPage(),
           },
           response,
@@ -462,6 +467,7 @@ describe('screenshot', () => {
             params: {
               format: 'png',
               uid: '1_1',
+              inline: true,
             },
             page: context.getSelectedMcpPage(),
           },
@@ -623,7 +629,10 @@ describe('screenshot', () => {
         // No explicit format passed: zod should apply the CLI-driven default.
         await tool.handler(
           {
-            params: {format: zod.object(tool.schema).parse({}).format},
+            params: {
+              format: zod.object(tool.schema).parse({}).format,
+              inline: true,
+            },
             page: context.getSelectedMcpPage(),
           },
           response,
@@ -652,7 +661,10 @@ describe('screenshot', () => {
         );
 
         await tool.handler(
-          {params: {format: 'png'}, page: context.getSelectedMcpPage()},
+          {
+            params: {format: 'png', inline: true},
+            page: context.getSelectedMcpPage(),
+          },
           response,
           context,
         );
@@ -684,7 +696,10 @@ describe('screenshot', () => {
           assert.strictEqual(source.devicePixelRatio, 2);
 
           await tool.handler(
-            {params: {format: 'png'}, page: context.getSelectedMcpPage()},
+            {
+              params: {format: 'png', inline: true},
+              page: context.getSelectedMcpPage(),
+            },
             response,
             context,
           );
@@ -723,7 +738,10 @@ describe('screenshot', () => {
         }));
 
         await tool.handler(
-          {params: {format: 'png'}, page: context.getSelectedMcpPage()},
+          {
+            params: {format: 'png', inline: true},
+            page: context.getSelectedMcpPage(),
+          },
           response,
           context,
         );
@@ -754,7 +772,10 @@ describe('screenshot', () => {
         );
 
         await tool.handler(
-          {params: {format: 'png'}, page: context.getSelectedMcpPage()},
+          {
+            params: {format: 'png', inline: true},
+            page: context.getSelectedMcpPage(),
+          },
           response,
           context,
         );
@@ -777,7 +798,10 @@ describe('screenshot', () => {
         await page.setContent(html`<div></div>`);
 
         await tool.handler(
-          {params: {format: 'png'}, page: context.getSelectedMcpPage()},
+          {
+            params: {format: 'png', inline: true},
+            page: context.getSelectedMcpPage(),
+          },
           response,
           context,
         );
@@ -805,7 +829,7 @@ describe('screenshot', () => {
 
         await tool.handler(
           {
-            params: {format: 'png', fullPage: true},
+            params: {format: 'png', fullPage: true, inline: true},
             page: context.getSelectedMcpPage(),
           },
           response,

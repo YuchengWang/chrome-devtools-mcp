@@ -61,3 +61,51 @@ const URL_SIZE_LIMIT = 255;
 export function truncateUrl(url: string): string {
   return truncateText(url, URL_SIZE_LIMIT, {ellipsis: '... <truncated>'});
 }
+
+export const DEFAULT_RESPONSE_MAX_BYTES = 8800;
+
+function sliceUtf8Head(buf: Buffer, maxBytes: number): string {
+  if (maxBytes <= 0) {
+    return '';
+  }
+  let end = Math.min(buf.length, maxBytes);
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) {
+    end--;
+  }
+  return buf.subarray(0, end).toString('utf8');
+}
+
+function sliceUtf8Tail(buf: Buffer, maxBytes: number): string {
+  if (maxBytes <= 0) {
+    return '';
+  }
+  let start = Math.max(0, buf.length - maxBytes);
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) {
+    start++;
+  }
+  return buf.subarray(start).toString('utf8');
+}
+
+/**
+ * Folds `text` using a UTF-8 safe head-tail split so the resulting string
+ * (including `buildNotice(totalBytes)`) does not exceed `maxBytes` UTF-8 bytes.
+ */
+export function foldHeadTailUtf8(
+  text: string,
+  maxBytes: number,
+  buildNotice: (totalBytes: number) => string,
+): string {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= maxBytes) {
+    return text;
+  }
+  const notice = buildNotice(buf.length);
+  const noticeBytes = Buffer.byteLength(notice, 'utf8');
+  if (noticeBytes >= maxBytes) {
+    return sliceUtf8Head(Buffer.from(notice, 'utf8'), maxBytes);
+  }
+  const remaining = maxBytes - noticeBytes;
+  const headBudget = Math.floor(remaining * 0.6);
+  const tailBudget = remaining - headBudget;
+  return `${sliceUtf8Head(buf, headBudget)}${notice}${sliceUtf8Tail(buf, tailBudget)}`;
+}

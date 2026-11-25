@@ -52,6 +52,14 @@ export {Deferred} from 'puppeteer-core/internal/util/Deferred.js';
 export {PUPPETEER_REVISIONS} from 'puppeteer-core/internal/revisions.js';
 export {createRemoteException} from 'puppeteer-core/internal/cdp/utils.js';
 export {
+  NodeWebSocketTransport,
+  DEFAULT_MAX_PAYLOAD_BYTES,
+  type NodeWebSocketTransportOptions,
+} from 'puppeteer-core/internal/node/NodeWebSocketTransport.js';
+export {convertPuppeteerChannelToBrowsersChannel} from 'puppeteer-core/internal/node/LaunchOptions.js';
+export {packageVersion as puppeteerPackageVersion} from 'puppeteer-core/internal/util/version.js';
+export {default as NodeWebSocket} from 'ws';
+export {
   computeExecutablePath,
   resolveDefaultUserDataDir,
   detectBrowserPlatform,

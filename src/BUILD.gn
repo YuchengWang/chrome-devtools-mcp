@@ -42,6 +42,7 @@ ts_library("third_party") {
     "third_party/devtools-heap-snapshot-worker.ts",
     "third_party/index.ts",
     "third_party/lighthouse-devtools-mcp-bundle.d.ts",
+    "third_party/ws.d.ts",
     "third_party/zod.ts",
   ]
 
@@ -234,10 +235,12 @@ ts_library("mcp_lib") {
     "telemetry/watchdog/ClearcutSender.ts",
     "telemetry/watchdog/main.ts",
     "tools/ToolDefinition.ts",
+    "tools/batch.ts",
     "tools/categories.ts",
     "tools/comments.ts",
     "tools/console.ts",
     "tools/css.ts",
+    "tools/diagnose.ts",
     "tools/emulation.ts",
     "tools/extensions.ts",
     "tools/input.ts",

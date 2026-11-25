@@ -13,7 +13,7 @@ import {
 } from '../third_party/browser.js';
 import {truncateText, truncateUrl} from '../utils/text.js';
 
-const BODY_CONTEXT_SIZE_LIMIT = 10000;
+const BODY_CONTEXT_SIZE_LIMIT = 2000;
 /**
  * How long to wait for a response body. Puppeteer reads a body only after the
  * response finished loading, with no timeout of its own, and a response that

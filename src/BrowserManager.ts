@@ -13,8 +13,10 @@ import type {ReadonlyServerConfig} from './config/ServerConfig.js';
 import type {
   Browser,
   ChromeReleaseChannel,
+  ConnectionTransport,
   ConnectOptions,
   LaunchOptions,
+  NodeWebSocketTransportOptions,
   PuppeteerNode,
 } from './third_party/browser.js';
 import {loadBrowser, Mutex} from './third_party/index.js';
@@ -29,6 +31,93 @@ import {isAllowedUrl} from './utils/url.js';
 export interface BrowserManagerOptions {
   logFile?: fs.WriteStream;
 }
+
+export interface AbortableTransportHandle {
+  transport: ConnectionTransport;
+  terminate: () => void;
+}
+
+export const connectTransport = {
+  async create(
+    url: string,
+    headers: Record<string, string> | undefined,
+    logger: NonNullable<ConnectOptions['logger']>,
+    options: NodeWebSocketTransportOptions,
+    signal: AbortSignal,
+  ): Promise<AbortableTransportHandle> {
+    if (signal.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('Connection attempt was abandoned before it completed.');
+    }
+    const {
+      NodeWebSocket,
+      NodeWebSocketTransport,
+      DEFAULT_MAX_PAYLOAD_BYTES,
+      puppeteerPackageVersion,
+    } = await loadBrowser();
+    if (signal.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('Connection attempt was abandoned before it completed.');
+    }
+    return await new Promise<AbortableTransportHandle>((resolve, reject) => {
+      const ws = new NodeWebSocket(url, [], {
+        followRedirects: true,
+        perMessageDeflate: false,
+        allowSynchronousEvents: false,
+        maxPayload: options.maxPayload ?? DEFAULT_MAX_PAYLOAD_BYTES,
+        handshakeTimeout: options.handshakeTimeout,
+        headers: {
+          'User-Agent': `Puppeteer ${puppeteerPackageVersion}`,
+          ...headers,
+        },
+      });
+
+      const cleanup = (): void => {
+        ws.removeEventListener('open', onOpen);
+        ws.removeEventListener('error', onError);
+        signal.removeEventListener('abort', onAbort);
+      };
+
+      const onOpen = (): void => {
+        cleanup();
+        const transport = new NodeWebSocketTransport(ws, logger, options);
+        resolve({
+          transport,
+          terminate: () => {
+            transport.close();
+            ws.terminate();
+          },
+        });
+      };
+
+      const onError = (err: unknown): void => {
+        cleanup();
+        reject(err);
+      };
+
+      const onAbort = (): void => {
+        cleanup();
+        // ws.terminate() during CONNECTING emits an 'error' event; swallow it
+        // so Node does not crash with an unhandled 'error' event.
+        ws.on('error', () => {});
+        ws.terminate();
+        reject(
+          signal.reason instanceof Error
+            ? signal.reason
+            : new Error(
+                'Connection attempt was abandoned before it completed.',
+              ),
+        );
+      };
+
+      ws.addEventListener('open', onOpen);
+      ws.addEventListener('error', onError);
+      signal.addEventListener('abort', onAbort, {once: true});
+    });
+  },
+};
 
 /**
  * Identity token for an in-flight connect/launch attempt. Instances carry no
@@ -57,6 +146,7 @@ export class BrowserManager {
   #options: BrowserManagerOptions;
 
   #browserAttempt: BrowserAttempt = new BrowserAttempt();
+  #connectAbortController?: AbortController;
 
   constructor(
     config: ReadonlyServerConfig,
@@ -231,6 +321,10 @@ export class BrowserManager {
   abandonPendingAttempt(): void {
     this.#browserAttempt = new BrowserAttempt();
     this.#initPromise = undefined;
+    this.#connectAbortController?.abort(
+      new Error('Connection attempt was abandoned before it completed.'),
+    );
+    this.#connectAbortController = undefined;
     this.#forgetCurrentBrowser();
   }
 
@@ -384,6 +478,104 @@ export class BrowserManager {
     }
   }
 
+  async #readDevToolsActivePort(
+    activePortDir: string,
+    customUserDataDir?: string,
+    channelName?: string,
+  ): Promise<string> {
+    const portPath = path.join(activePortDir, 'DevToolsActivePort');
+    try {
+      const fileContent = await fs.promises.readFile(portPath, 'utf8');
+      const [rawPort, rawPath] = fileContent
+        .split('\n')
+        .map(line => {
+          return line.trim();
+        })
+        .filter(line => {
+          return !!line;
+        });
+      if (!rawPort || !rawPath) {
+        throw new Error(`Invalid DevToolsActivePort '${fileContent}' found`);
+      }
+      const port = parseInt(rawPort, 10);
+      if (isNaN(port) || port <= 0 || port > 65535) {
+        throw new Error(`Invalid port '${rawPort}' found`);
+      }
+      const host = customUserDataDir ? '127.0.0.1' : 'localhost';
+      return `ws://${host}:${port}${rawPath}`;
+    } catch (error) {
+      if (customUserDataDir !== undefined) {
+        const permissionError = devToolsActivePortPermissionError(
+          error,
+          customUserDataDir,
+        );
+        if (permissionError) {
+          throw permissionError;
+        }
+        throw new Error(
+          `Could not connect to Chrome in ${customUserDataDir}. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.`,
+          {
+            cause: error,
+          },
+        );
+      }
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error.code === 'EPERM' || error.code === 'EACCES')
+      ) {
+        const wrapped = new Error(
+          `Could not read DevToolsActivePort for ${channelName} at ${portPath}: permission denied`,
+          {cause: error},
+        );
+        const permissionError = devToolsActivePortPermissionError(wrapped);
+        if (permissionError) {
+          throw permissionError;
+        }
+      }
+      throw new Error(
+        `Could not connect to Chrome. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.`,
+        {
+          cause: error,
+        },
+      );
+    }
+  }
+
+  async #fetchWSEndpoint(
+    browserURL: string,
+    headers: Record<string, string> | undefined,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const endpointURL = new URL(browserURL);
+    endpointURL.pathname =
+      endpointURL.pathname.replace(/\/?$/, '') + '/json/version';
+    endpointURL.hash = '';
+    const urlString = endpointURL.toString();
+    try {
+      const result = await globalThis.fetch(urlString, {
+        method: 'GET',
+        headers,
+        signal,
+      });
+      if (!result.ok) {
+        throw new Error(`HTTP ${result.statusText}`);
+      }
+      const data = (await result.json()) as {webSocketDebuggerUrl: string};
+      return data.webSocketDebuggerUrl;
+    } catch (error) {
+      if (signal.aborted) {
+        throw error;
+      }
+      if (error instanceof Error) {
+        error.message =
+          `Failed to fetch browser webSocket URL from ${urlString}: ` +
+          error.message;
+      }
+      throw error;
+    }
+  }
+
   async #connect(): Promise<Browser> {
     const {
       browserUrl: browserURL,
@@ -405,90 +597,139 @@ export class BrowserManager {
       blocklist,
       allowlist,
       logger: puppeteerLogger,
-      // Detects a transport that died without a close frame (e.g. an adb
-      // port-forward torn down mid-call). Puppeteer pings the socket
-      // periodically and terminates it on a missed pong, which rejects the
-      // in-flight CDP calls and fires `disconnected` so #evictIfCurrent()
-      // drops the stale handle. Without this, such a call would hang until
-      // protocolTimeout inside the context queue.
-      wsOptions: {
-        keepAlive: true,
-        headers: wsHeaders,
-      },
     };
 
-    let autoConnect = false;
-    if (wsEndpoint) {
-      connectOptions.browserWSEndpoint = wsEndpoint;
-    } else if (browserURL) {
-      connectOptions.browserURL = browserURL;
-    } else if (channel || userDataDir) {
-      autoConnect = true;
-      if (userDataDir) {
-        // TODO: re-expose this logic via Puppeteer.
-        const portPath = path.join(userDataDir, 'DevToolsActivePort');
-        try {
-          const fileContent = await fs.promises.readFile(portPath, 'utf8');
-          const [rawPort, rawPath] = fileContent
-            .split('\n')
-            .map(line => {
-              return line.trim();
-            })
-            .filter(line => {
-              return !!line;
-            });
-          if (!rawPort || !rawPath) {
-            throw new Error(
-              `Invalid DevToolsActivePort '${fileContent}' found`,
-            );
-          }
-          const port = parseInt(rawPort, 10);
-          if (isNaN(port) || port <= 0 || port > 65535) {
-            throw new Error(`Invalid port '${rawPort}' found`);
-          }
-          const browserWSEndpoint = `ws://127.0.0.1:${port}${rawPath}`;
-          connectOptions.browserWSEndpoint = browserWSEndpoint;
-        } catch (error) {
-          const permissionError = devToolsActivePortPermissionError(
-            error,
-            userDataDir,
-          );
-          if (permissionError) {
-            throw permissionError;
-          }
-          throw new Error(
-            `Could not connect to Chrome in ${userDataDir}. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.`,
-            {
-              cause: error,
-            },
-          );
-        }
-      } else {
-        if (!channel) {
-          throw new Error('Channel must be provided if userDataDir is missing');
-        }
-        connectOptions.channel =
-          channel === 'stable' ? 'chrome' : `chrome-${channel}`;
-      }
-    } else {
+    const autoConnect = !wsEndpoint && !browserURL && !!(channel || userDataDir);
+    if (!wsEndpoint && !browserURL && !autoConnect) {
       throw new Error(
         'Either browserURL, wsEndpoint, channel or userDataDir must be provided',
       );
     }
 
+    const abortController = new AbortController();
+    this.#connectAbortController = abortController;
+    const {signal} = abortController;
+
     logger?.(
       'Connecting Puppeteer to ',
-      JSON.stringify(redactConnectOptionsForLogging(connectOptions)),
+      JSON.stringify(
+        redactConnectOptionsForLogging({
+          ...connectOptions,
+          ...(wsEndpoint ? {browserWSEndpoint: wsEndpoint} : {}),
+          ...(browserURL ? {browserURL} : {}),
+          ...(channel ? {channel} : {}),
+          ...(wsHeaders ? {headers: wsHeaders} : {}),
+        }),
+      ),
     );
-    const puppeteer = await loadPuppeteer();
+
+    const pendingHandshakeWarningMs = 5_000;
+    const pendingHandshakeTimer = autoConnect
+      ? setTimeout(() => {
+          const message =
+            'Puppeteer autoConnect handshake is still pending after 5s; Chrome may be waiting on the "Allow remote debugging?" native prompt.';
+          logger?.(message);
+          console.warn(message);
+        }, pendingHandshakeWarningMs)
+      : undefined;
+    pendingHandshakeTimer?.unref?.();
+
+    let handle: AbortableTransportHandle | undefined;
+    const onAbortDuringConnect = (): void => {
+      handle?.terminate();
+    };
+    signal.addEventListener('abort', onAbortDuringConnect, {once: true});
+
     try {
-      const connected = await puppeteer.connect(connectOptions);
+      const puppeteer = await loadPuppeteer();
+      if (signal.aborted) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Connection attempt was abandoned before it completed.');
+      }
+
+      let resolvedWsEndpoint: string;
+      if (wsEndpoint) {
+        resolvedWsEndpoint = wsEndpoint;
+      } else if (browserURL) {
+        resolvedWsEndpoint = await this.#fetchWSEndpoint(
+          browserURL,
+          wsHeaders,
+          signal,
+        );
+      } else if (userDataDir) {
+        resolvedWsEndpoint = await this.#readDevToolsActivePort(
+          userDataDir,
+          userDataDir,
+        );
+      } else {
+        if (!channel) {
+          throw new Error('Channel must be provided if userDataDir is missing');
+        }
+        const {
+          detectBrowserPlatform,
+          resolveDefaultUserDataDir,
+          BrowserEnum,
+          convertPuppeteerChannelToBrowsersChannel,
+        } = await loadBrowser();
+        const platform = detectBrowserPlatform();
+        if (!platform) {
+          throw new Error('Could not detect required browser platform');
+        }
+        const puppeteerChannel: ChromeReleaseChannel =
+          channel === 'stable' ? 'chrome' : `chrome-${channel}`;
+        const defaultUserDataDir = resolveDefaultUserDataDir(
+          BrowserEnum.CHROME,
+          platform,
+          convertPuppeteerChannelToBrowsersChannel(puppeteerChannel),
+        );
+        resolvedWsEndpoint = await this.#readDevToolsActivePort(
+          defaultUserDataDir,
+          undefined,
+          puppeteerChannel,
+        );
+      }
+
+      if (signal.aborted) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Connection attempt was abandoned before it completed.');
+      }
+
+      handle = await connectTransport.create(
+        resolvedWsEndpoint,
+        wsHeaders,
+        puppeteerLogger,
+        {keepAlive: true},
+        signal,
+      );
+      if (signal.aborted) {
+        handle.terminate();
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Connection attempt was abandoned before it completed.');
+      }
+
+      const connected = await puppeteer.connect({
+        ...connectOptions,
+        transport: handle.transport,
+      });
       logger?.('Connected Puppeteer');
       this.#browserMode = 'connected';
       this.#browser = connected;
       connected.once('disconnected', () => this.#evictIfCurrent(connected));
       return connected;
     } catch (err) {
+      handle?.terminate();
+      if (signal.aborted) {
+        throw err;
+      }
+      if (
+        err instanceof Error &&
+        err.message.startsWith('Could not connect to Chrome')
+      ) {
+        throw err;
+      }
       const permissionError = devToolsActivePortPermissionError(err);
       if (permissionError) {
         throw permissionError;
@@ -499,6 +740,14 @@ export class BrowserManager {
           cause: err,
         },
       );
+    } finally {
+      signal.removeEventListener('abort', onAbortDuringConnect);
+      if (this.#connectAbortController === abortController) {
+        this.#connectAbortController = undefined;
+      }
+      if (pendingHandshakeTimer !== undefined) {
+        clearTimeout(pendingHandshakeTimer);
+      }
     }
   }
 
@@ -596,6 +845,10 @@ export class BrowserManager {
   async close(): Promise<void> {
     this.#initPromise = undefined;
     this.#closingCount++;
+    this.#connectAbortController?.abort(
+      new Error('Browser was closed while initializing.'),
+    );
+    this.#connectAbortController = undefined;
     using guard = await this.#mutex.acquire();
     try {
       await this.#closeBrowser();

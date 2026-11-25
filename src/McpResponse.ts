@@ -79,7 +79,11 @@ import type {CD4ACommentThread, PaginationOptions} from './types.js';
 import {stableIdSymbol, type WithSymbolId} from './utils/id.js';
 import {paginate} from './utils/pagination.js';
 import {getFilterableResourceType} from './utils/resourceType.js';
-import {truncateText} from './utils/text.js';
+import {
+  DEFAULT_RESPONSE_MAX_BYTES,
+  foldHeadTailUtf8,
+  truncateText,
+} from './utils/text.js';
 import type {WaitForEventsResult} from './utils/WaitForHelper.js';
 
 const {formatBytesToKb} = DevTools.I18n.ByteUtilities;
@@ -576,7 +580,11 @@ export class McpResponse implements Response {
       verbose: this.#snapshotParams.verbose,
       devtoolsData: this.#devToolsData,
     });
-    const formatter = new SnapshotFormatter(this.#page.textSnapshot);
+    const formatter = new SnapshotFormatter(this.#page.textSnapshot, {
+      rootUid: this.#snapshotParams.rootUid,
+      maxDepth: this.#snapshotParams.maxDepth,
+      interactiveOnly: this.#snapshotParams.interactiveOnly,
+    });
     if (this.#snapshotParams.filePath) {
       const result = await context.saveFile(
         new TextEncoder().encode(formatter.toString()),
@@ -1934,9 +1942,29 @@ Call ${handleDialog(this.#config.resolved).name} to handle it before continuing.
       structuredContent.errorMessage = data.errorMessage;
     }
 
+    let responseText = response.join('\n');
+    if (Buffer.byteLength(responseText, 'utf8') > DEFAULT_RESPONSE_MAX_BYTES) {
+      let savedPath: string | undefined;
+      if (typeof context?.saveTemporaryFile === 'function') {
+        const saved = await context.saveTemporaryFile(
+          Buffer.from(responseText, 'utf8'),
+          'mcp-response.txt',
+        );
+        savedPath = saved?.filepath;
+      }
+      responseText = foldHeadTailUtf8(
+        responseText,
+        DEFAULT_RESPONSE_MAX_BYTES,
+        totalBytes =>
+          savedPath
+            ? `\n\n... [truncated ${totalBytes} bytes total; full output saved to ${savedPath}] ...\n\n`
+            : `\n\n... [truncated ${totalBytes} bytes total] ...\n\n`,
+      );
+    }
+
     const text: TextContent = {
       type: 'text',
-      text: response.join('\n'),
+      text: responseText,
     };
     const images: ImageContent[] = this.#images.map(imageData => {
       return {
@@ -1978,13 +2006,11 @@ Call ${handleDialog(this.#config.resolved).name} to handle it before continuing.
     response.push(
       `Showing ${displayStartIndex}-${endIndex} of ${data.length} (Page ${currentPage + 1} of ${totalPages}).`,
     );
-    if (pagination) {
-      if (paginationResult.hasNextPage) {
-        response.push(`Next page: ${currentPage + 1}`);
-      }
-      if (paginationResult.hasPreviousPage) {
-        response.push(`Previous page: ${currentPage - 1}`);
-      }
+    if (paginationResult.hasNextPage) {
+      response.push(`Next page: ${currentPage + 1}`);
+    }
+    if (paginationResult.hasPreviousPage) {
+      response.push(`Previous page: ${currentPage - 1}`);
     }
 
     return {

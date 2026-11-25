@@ -553,6 +553,9 @@ export function createMockMcpContext(
   context.getSelectedMcpPage.returns(page satisfies McpPage);
   context.getPages.returns([page]);
   context.getTargetInfos.resolves(new Map());
+  context.saveTemporaryFile.callsFake(async (_data, filename) => ({
+    filepath: `/tmp/${filename}`,
+  }));
   // Real queues, so handler tests observe the real scheduling.
   const taskRunner = options.taskRunner ?? new TaskRunner();
   const taskQueue = taskRunner.createQueue();

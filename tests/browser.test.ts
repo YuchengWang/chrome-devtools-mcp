@@ -6,14 +6,20 @@
 
 import assert from 'node:assert';
 import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import {describe, it} from 'node:test';
 
 import sinon from 'sinon';
 
-import {BrowserManager} from '../src/BrowserManager.js';
-import {puppeteer, type Browser} from '../src/third_party/browser.js';
+import {BrowserManager, connectTransport} from '../src/BrowserManager.js';
+import {
+  puppeteer,
+  type Browser,
+  type ConnectionTransport,
+} from '../src/third_party/browser.js';
 
 import {
   createMockPuppeteerBrowser,
@@ -58,6 +64,29 @@ async function runWithRetry(fn: () => Promise<void>) {
   throw lastError ?? new Error('Failed without an error');
 }
 
+function stubBrowserUrlFetch(
+  wsEndpoint = 'ws://127.0.0.1:9222/devtools/browser/abc',
+) {
+  return sinon.stub(globalThis, 'fetch').callsFake(async () => {
+    return new Response(JSON.stringify({webSocketDebuggerUrl: wsEndpoint}), {
+      status: 200,
+      headers: {'content-type': 'application/json'},
+    });
+  });
+}
+
+function stubConnectTransport() {
+  const transport: ConnectionTransport = {
+    send: sinon.stub(),
+    close: sinon.stub(),
+  };
+  const terminate = sinon.stub();
+  const createStub = sinon
+    .stub(connectTransport, 'create')
+    .resolves({transport, terminate});
+  return {createStub, transport, terminate};
+}
+
 describe('browser', () => {
   it('detects display does not crash', () => {
     BrowserManager.detectDisplay();
@@ -69,6 +98,7 @@ describe('browser', () => {
       const connectStub = sinon
         .stub(puppeteer, 'connect')
         .resolves(pptrBrowser);
+      const {createStub, transport} = stubConnectTransport();
       const endpoint =
         'wss://user:password@browser.example/devtools/browser/test?token=WS_SECRET_123';
       const headers = {
@@ -81,14 +111,12 @@ describe('browser', () => {
 
       await manager.ensureBrowser();
 
+      sinon.assert.calledOnce(createStub);
+      assert.strictEqual(createStub.firstCall.args[0], endpoint);
+      assert.deepStrictEqual(createStub.firstCall.args[1], headers);
       sinon.assert.calledOnceWithMatch(connectStub, {
-        browserWSEndpoint: endpoint,
-        wsOptions: {headers},
+        transport,
       });
-      assert.deepStrictEqual(
-        connectStub.firstCall.args[0].wsOptions?.headers,
-        headers,
-      );
       await manager.close();
     });
 
@@ -206,6 +234,8 @@ describe('browser', () => {
 
     it('disables following symlinks in Puppeteer before connecting', async () => {
       const setFollowSymlinksStub = sinon.stub(puppeteer, 'setFollowSymlinks');
+      stubBrowserUrlFetch();
+      stubConnectTransport();
       const connectStub = sinon
         .stub(puppeteer, 'connect')
         .resolves(createMockPuppeteerBrowser());
@@ -222,6 +252,10 @@ describe('browser', () => {
     it('connects to a browser when browserUrl is set and disconnects on close()', async () => {
       const pptrBrowser = createMockPuppeteerBrowser();
       const launchStub = sinon.stub(puppeteer, 'launch');
+      const fetchStub = stubBrowserUrlFetch(
+        'ws://127.0.0.1:9222/devtools/browser/abc',
+      );
+      const {createStub, transport} = stubConnectTransport();
       const connectStub = sinon
         .stub(puppeteer, 'connect')
         .resolves(pptrBrowser);
@@ -235,11 +269,19 @@ describe('browser', () => {
       const browser = await manager.ensureBrowser();
 
       assert.strictEqual(browser, pptrBrowser);
-      sinon.assert.calledOnce(connectStub);
-      sinon.assert.notCalled(launchStub);
-      sinon.assert.calledWithMatch(connectStub, {
-        browserURL: 'http://127.0.0.1:9222',
+      sinon.assert.calledOnceWithMatch(
+        fetchStub,
+        'http://127.0.0.1:9222/json/version',
+      );
+      sinon.assert.calledOnce(createStub);
+      assert.strictEqual(
+        createStub.firstCall.args[0],
+        'ws://127.0.0.1:9222/devtools/browser/abc',
+      );
+      sinon.assert.calledOnceWithMatch(connectStub, {
+        transport,
       });
+      sinon.assert.notCalled(launchStub);
 
       await manager.close();
       sinon.assert.calledOnceWithExactly(pptrBrowser.disconnect);
@@ -247,6 +289,7 @@ describe('browser', () => {
     });
 
     it('enables WebSocket keep-alive and passes wsHeaders when connecting', async () => {
+      const {createStub, transport} = stubConnectTransport();
       const connectStub = sinon
         .stub(puppeteer, 'connect')
         .resolves(createMockPuppeteerBrowser());
@@ -257,17 +300,22 @@ describe('browser', () => {
       });
       await new BrowserManager(args).ensureBrowser();
 
-      sinon.assert.calledWithMatch(connectStub, {
-        browserWSEndpoint: 'ws://127.0.0.1:9222/devtools/browser/abc',
-        wsOptions: {
-          keepAlive: true,
-          headers: {Authorization: 'Bearer token'},
-        },
+      sinon.assert.calledOnce(createStub);
+      assert.strictEqual(
+        createStub.firstCall.args[0],
+        'ws://127.0.0.1:9222/devtools/browser/abc',
+      );
+      assert.deepStrictEqual(createStub.firstCall.args[1], {
+        Authorization: 'Bearer token',
       });
+      assert.deepStrictEqual(createStub.firstCall.args[3], {keepAlive: true});
+      sinon.assert.calledWithMatch(connectStub, {transport});
     });
 
     for (const categoryExtensions of [false, true]) {
       it(`${categoryExtensions ? 'keeps' : 'drops'} extension targets when connecting with categoryExtensions=${categoryExtensions}`, async () => {
+        stubBrowserUrlFetch();
+        stubConnectTransport();
         const connectStub = sinon
           .stub(puppeteer, 'connect')
           .resolves(createMockPuppeteerBrowser());
@@ -504,6 +552,8 @@ describe('browser', () => {
       it('disconnects an already-cached connected browser when abandoned', async () => {
         const firstBrowser = createMockPuppeteerBrowser();
         const secondBrowser = createMockPuppeteerBrowser();
+        stubBrowserUrlFetch();
+        stubConnectTransport();
         const connectStub = sinon
           .stub(puppeteer, 'connect')
           .onFirstCall()
@@ -533,6 +583,8 @@ describe('browser', () => {
       it('discards a connect() resolution that arrives after being abandoned, and a fresh call still succeeds', async () => {
         const abandonedBrowser = createMockPuppeteerBrowser();
         const freshBrowser = createMockPuppeteerBrowser();
+        stubBrowserUrlFetch();
+        stubConnectTransport();
         const connectStarted = Promise.withResolvers<void>();
         const connectDeferred = Promise.withResolvers<Browser>();
         const connectStub = sinon
@@ -684,6 +736,115 @@ describe('browser', () => {
         assert.strictEqual(second, secondBrowser);
         sinon.assert.calledTwice(launchStub);
       });
+
+      it('aborts an in-flight WebSocket handshake when abandoned and cleans up the socket', async () => {
+        const socketConnected = Promise.withResolvers<void>();
+        const socketClosed = Promise.withResolvers<void>();
+        const server = net.createServer(socket => {
+          socketConnected.resolve();
+          socket.once('close', () => {
+            socketClosed.resolve();
+          });
+        });
+        await new Promise<void>(resolve => {
+          server.listen(0, '127.0.0.1', resolve);
+        });
+        const address = server.address() as net.AddressInfo;
+
+        try {
+          const freshBrowser = createMockPuppeteerBrowser();
+          const connectStub = sinon
+            .stub(puppeteer, 'connect')
+            .resolves(freshBrowser);
+
+          const manager = new BrowserManager(
+            createMockServerConfig({
+              wsEndpoint: `ws://127.0.0.1:${address.port}/devtools/browser/test`,
+            }),
+          );
+
+          const ensurePromise = manager.ensureBrowser();
+          await socketConnected.promise;
+
+          manager.abandonPendingAttempt();
+
+          await assert.rejects(
+            ensurePromise,
+            /Connection attempt was abandoned before it completed/,
+          );
+          await socketClosed.promise;
+          sinon.assert.notCalled(connectStub);
+
+          // Subsequent ensureBrowser() still works and reuses the new browser.
+          stubConnectTransport();
+          const connected = await manager.ensureBrowser();
+          assert.strictEqual(connected, freshBrowser);
+          assert.strictEqual(await manager.ensureBrowser(), freshBrowser);
+          sinon.assert.calledOnce(connectStub);
+          await manager.close();
+        } finally {
+          await new Promise<void>(resolve => server.close(() => resolve()));
+        }
+      });
+
+      it('aborts an in-flight browserUrl fetch when abandoned', async () => {
+        const requestReceived = Promise.withResolvers<void>();
+        const requestClosed = Promise.withResolvers<void>();
+        const server = http.createServer((req, _res) => {
+          requestReceived.resolve();
+          req.on('close', () => {
+            requestClosed.resolve();
+          });
+        });
+        await new Promise<void>(resolve => {
+          server.listen(0, '127.0.0.1', resolve);
+        });
+        const address = server.address() as net.AddressInfo;
+
+        try {
+          const manager = new BrowserManager(
+            createMockServerConfig({
+              browserUrl: `http://127.0.0.1:${address.port}`,
+            }),
+          );
+
+          const ensurePromise = manager.ensureBrowser();
+          await requestReceived.promise;
+
+          manager.abandonPendingAttempt();
+
+          await assert.rejects(ensurePromise);
+          await requestClosed.promise;
+        } finally {
+          server.closeAllConnections();
+          await new Promise<void>(resolve => server.close(() => resolve()));
+        }
+      });
+
+      it('terminates an opened transport if abandoned while puppeteer.connect() is still pending', async () => {
+        const {terminate} = stubConnectTransport();
+        const connectStarted = Promise.withResolvers<void>();
+        const connectDeferred = Promise.withResolvers<Browser>();
+        sinon.stub(puppeteer, 'connect').callsFake(() => {
+          connectStarted.resolve();
+          return connectDeferred.promise;
+        });
+
+        const manager = new BrowserManager(
+          createMockServerConfig({
+            wsEndpoint: 'ws://127.0.0.1:9222/devtools/browser/test',
+          }),
+        );
+
+        const ensurePromise = manager.ensureBrowser();
+        await connectStarted.promise;
+
+        manager.abandonPendingAttempt();
+        sinon.assert.calledOnce(terminate);
+
+        connectDeferred.reject(new Error('Connection closed'));
+        await assert.rejects(ensurePromise);
+      });
     });
 
     it('includes remote debugging hint and preserves cause when autoConnect fails without userDataDir', async () => {
@@ -693,11 +854,8 @@ describe('browser', () => {
         ),
         {code: 'ENOENT'},
       );
-      const puppeteerError = new Error(
-        'Could not find DevToolsActivePort for chrome at /Users/test/Library/Application Support/Google/Chrome/DevToolsActivePort',
-        {cause: enoentError},
-      );
-      sinon.stub(puppeteer, 'connect').rejects(puppeteerError);
+      sinon.stub(fs.promises, 'readFile').rejects(enoentError);
+      const connectStub = sinon.stub(puppeteer, 'connect');
 
       const manager = new BrowserManager(
         createMockServerConfig({
@@ -712,9 +870,10 @@ describe('browser', () => {
           err.message,
           'Could not connect to Chrome. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.',
         );
-        assert.strictEqual(err.cause, puppeteerError);
+        assert.strictEqual(err.cause, enoentError);
         return true;
       });
+      sinon.assert.notCalled(connectStub);
     });
 
     it('explains macOS Files & Folders permission when autoConnect is denied reading DevToolsActivePort without userDataDir', async () => {
@@ -725,11 +884,8 @@ describe('browser', () => {
         ),
         {code: 'EPERM'},
       );
-      const puppeteerError = new Error(
-        'Could not read DevToolsActivePort for chrome at /Users/test/Library/Application Support/Google/Chrome/DevToolsActivePort: permission denied',
-        {cause: epermError},
-      );
-      sinon.stub(puppeteer, 'connect').rejects(puppeteerError);
+      sinon.stub(fs.promises, 'readFile').rejects(epermError);
+      const connectStub = sinon.stub(puppeteer, 'connect');
 
       const manager = new BrowserManager(
         createMockServerConfig({
@@ -744,9 +900,11 @@ describe('browser', () => {
           err.message,
           'Could not connect to Chrome: macOS blocked reading DevToolsActivePort. Grant the host application (such as your terminal or IDE) access to Google Chrome in System Settings > Privacy & Security > Files & Folders, then try again.',
         );
-        assert.strictEqual(err.cause, puppeteerError);
+        assert.ok(err.cause instanceof Error);
+        assert.strictEqual(err.cause.cause, epermError);
         return true;
       });
+      sinon.assert.notCalled(connectStub);
     });
 
     it('explains file permissions when autoConnect is denied reading DevToolsActivePort on non-macOS', async () => {
@@ -757,11 +915,8 @@ describe('browser', () => {
         ),
         {code: 'EACCES'},
       );
-      const puppeteerError = new Error(
-        'Could not read DevToolsActivePort for chrome at /home/test/.config/google-chrome/DevToolsActivePort: permission denied',
-        {cause: eaccesError},
-      );
-      sinon.stub(puppeteer, 'connect').rejects(puppeteerError);
+      sinon.stub(fs.promises, 'readFile').rejects(eaccesError);
+      const connectStub = sinon.stub(puppeteer, 'connect');
 
       const manager = new BrowserManager(
         createMockServerConfig({
@@ -776,9 +931,11 @@ describe('browser', () => {
           err.message,
           'Could not connect to Chrome: reading DevToolsActivePort was denied by file permissions. Check that the current user can read the Chrome profile directory, then try again.',
         );
-        assert.strictEqual(err.cause, puppeteerError);
+        assert.ok(err.cause instanceof Error);
+        assert.strictEqual(err.cause.cause, eaccesError);
         return true;
       });
+      sinon.assert.notCalled(connectStub);
     });
 
     it('explains macOS Files & Folders permission when reading DevToolsActivePort in userDataDir fails with EPERM', async () => {
@@ -872,6 +1029,84 @@ describe('browser', () => {
         return true;
       });
       sinon.assert.notCalled(connectStub);
+    });
+
+    it('logs a non-aborting warning when autoConnect handshake is still pending after 5s', async () => {
+      const clock = sinon.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout'],
+        shouldClearNativeTimers: true,
+      });
+      const warnStub = sinon.stub(console, 'warn');
+      sinon
+        .stub(fs.promises, 'readFile')
+        .resolves('9222\n/devtools/browser/abc');
+      stubConnectTransport();
+      const pptrBrowser = createMockPuppeteerBrowser();
+      let resolveConnect!: (browser: Browser) => void;
+      sinon.stub(puppeteer, 'connect').returns(
+        new Promise<Browser>(resolve => {
+          resolveConnect = resolve;
+        }),
+      );
+
+      const manager = new BrowserManager(
+        createMockServerConfig({
+          autoConnect: true,
+          channel: 'stable',
+        }),
+      );
+
+      const ensurePromise = manager.ensureBrowser();
+      await clock.tickAsync(4999);
+      sinon.assert.notCalled(warnStub);
+
+      await clock.tickAsync(1);
+      sinon.assert.calledOnce(warnStub);
+      assert.match(
+        String(warnStub.firstCall.args[0]),
+        /Allow remote debugging\?/,
+      );
+
+      resolveConnect(pptrBrowser);
+      const browser = await ensurePromise;
+      assert.strictEqual(browser, pptrBrowser);
+      await manager.close();
+    });
+
+    it('clears the 5s pending-handshake warning timer when autoConnect resolves or rejects quickly', async () => {
+      const clock = sinon.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout'],
+      });
+      const warnStub = sinon.stub(console, 'warn');
+      sinon
+        .stub(fs.promises, 'readFile')
+        .resolves('9222\n/devtools/browser/abc');
+      stubConnectTransport();
+      const pptrBrowser = createMockPuppeteerBrowser();
+      const connectStub = sinon.stub(puppeteer, 'connect');
+      connectStub.onFirstCall().resolves(pptrBrowser);
+      connectStub.onSecondCall().rejects(new Error('connection refused'));
+
+      const fastSuccessManager = new BrowserManager(
+        createMockServerConfig({
+          autoConnect: true,
+          channel: 'stable',
+        }),
+      );
+      await fastSuccessManager.ensureBrowser();
+      await clock.tickAsync(5000);
+      sinon.assert.notCalled(warnStub);
+      await fastSuccessManager.close();
+
+      const fastFailureManager = new BrowserManager(
+        createMockServerConfig({
+          autoConnect: true,
+          channel: 'stable',
+        }),
+      );
+      await assert.rejects(fastFailureManager.ensureBrowser());
+      await clock.tickAsync(5000);
+      sinon.assert.notCalled(warnStub);
     });
   });
 

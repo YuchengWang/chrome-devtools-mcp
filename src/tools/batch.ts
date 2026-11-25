@@ -15,6 +15,7 @@ import {
   type PageToolFactory,
 } from './ToolDefinition.js';
 
+// eslint-disable-next-line @local/enforce-zod-schema -- Nested action schema.
 const batchActionSchema = zod.object({
   type: zod
     .enum(['navigate_page', 'click', 'fill', 'wait_for', 'evaluate_script'])
@@ -69,13 +70,18 @@ export const batchActions: PageToolFactory = definePageTool(
         .describe(
           'Whether to include a take_snapshot after all actions finish. Default is false.',
         ),
+      /* eslint-disable @local/enforce-zod-schema -- Nested snapshotOptions schema. */
       snapshotOptions: zod
         .object({
           verbose: zod.boolean().optional(),
           rootUid: zod.string().optional(),
           maxDepth: zod.number().int().min(0).optional(),
           interactiveOnly: zod.boolean().optional(),
+          roles: zod.array(zod.string()).optional(),
+          formsOnly: zod.boolean().optional(),
+          outlineOnly: zod.boolean().optional(),
         })
+        /* eslint-enable @local/enforce-zod-schema */
         .optional()
         .describe('Optional parameters passed to the final take_snapshot.'),
       stopOnError: zod
@@ -243,6 +249,13 @@ export const batchActions: PageToolFactory = definePageTool(
           ...(opts?.maxDepth !== undefined ? {maxDepth: opts.maxDepth} : {}),
           ...(opts?.interactiveOnly !== undefined
             ? {interactiveOnly: opts.interactiveOnly}
+            : {}),
+          ...(opts?.roles !== undefined ? {roles: opts.roles} : {}),
+          ...(opts?.formsOnly !== undefined
+            ? {formsOnly: opts.formsOnly}
+            : {}),
+          ...(opts?.outlineOnly !== undefined
+            ? {outlineOnly: opts.outlineOnly}
             : {}),
         });
       }

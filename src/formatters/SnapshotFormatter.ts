@@ -12,6 +12,9 @@ export interface SnapshotFormatOptions {
   rootUid?: string;
   maxDepth?: number;
   interactiveOnly?: boolean;
+  roles?: string[];
+  formsOnly?: boolean;
+  outlineOnly?: boolean;
 }
 
 const INTERACTIVE_ROLES = new Set([
@@ -36,13 +39,50 @@ const INTERACTIVE_ROLES = new Set([
   'scrollbar',
 ]);
 
+const FORM_CONTROL_ROLES = new Set([
+  'textbox',
+  'searchbox',
+  'combobox',
+  'listbox',
+  'button',
+  'checkbox',
+  'radio',
+  'switch',
+  'spinbutton',
+  'slider',
+]);
+
+const OUTLINE_ROLES = new Set([
+  'rootwebarea',
+  'main',
+  'navigation',
+  'form',
+  'dialog',
+  'alertdialog',
+  'region',
+  'banner',
+  'contentinfo',
+  'search',
+  'complementary',
+  'heading',
+]);
+
 export class SnapshotFormatter {
   #snapshot: TextSnapshot;
   #options: SnapshotFormatOptions;
+  #roleFilter?: Set<string>;
 
   constructor(snapshot: TextSnapshot, options: SnapshotFormatOptions = {}) {
     this.#snapshot = snapshot;
     this.#options = options;
+    if (options.roles && options.roles.length > 0) {
+      const normalized = options.roles
+        .map(role => role.trim().toLowerCase())
+        .filter(Boolean);
+      if (normalized.length > 0) {
+        this.#roleFilter = new Set(normalized);
+      }
+    }
   }
 
   toString(): string {
@@ -59,12 +99,49 @@ export class SnapshotFormatter {
 Get a verbose snapshot to include all elements if you are interested in the selected element.\n\n`);
     }
 
+    const emptyMessage = this.#getEmptyFilterMessage(root);
+    if (emptyMessage) {
+      chunks.push(emptyMessage);
+      return chunks.join('');
+    }
+
     chunks.push(this.#formatNode(root, 0));
+    if (this.#isOutlineFallback(root)) {
+      chunks.push(this.#formatOutlineFallback(root));
+    }
     return chunks.join('');
   }
 
   toJSON(): object {
-    return this.#nodeToJSON(this.#resolveRoot(), 0);
+    const root = this.#resolveRoot();
+    const emptyMessage = this.#getEmptyFilterMessage(root);
+    if (emptyMessage) {
+      return {
+        ...this.#getAttributesMap(root),
+        empty: true,
+        message: emptyMessage.trim(),
+      };
+    }
+    if (this.#isOutlineFallback(root)) {
+      const result: Record<string, unknown> = {
+        ...this.#getAttributesMap(root),
+        nodeCount: countDescendants(root),
+        outlineFallback: true,
+      };
+      if (
+        (this.#options.maxDepth === undefined || this.#options.maxDepth > 0) &&
+        root.children.length > 0
+      ) {
+        result.children = root.children
+          .filter(child => child.role !== 'StaticText')
+          .map(child => ({
+            ...this.#getAttributesMap(child),
+            nodeCount: countDescendants(child),
+          }));
+      }
+      return result;
+    }
+    return this.#nodeToJSON(root, 0);
   }
 
   #resolveRoot(): TextSnapshotNode {
@@ -99,13 +176,97 @@ Get a verbose snapshot to include all elements if you are interested in the sele
     return false;
   }
 
+  #hasNodeFilter(): boolean {
+    return Boolean(
+      this.#options.outlineOnly ||
+        this.#roleFilter ||
+        this.#options.formsOnly ||
+        this.#options.interactiveOnly,
+    );
+  }
+
+  #matchesFilter(node: TextSnapshotNode): boolean {
+    if (this.#options.outlineOnly) {
+      return Boolean(node.role && OUTLINE_ROLES.has(node.role.toLowerCase()));
+    }
+    if (this.#roleFilter) {
+      if (!node.role) {
+        return false;
+      }
+      const normalizedRole =
+        node.role === 'none' ? 'ignored' : node.role.toLowerCase();
+      return (
+        this.#roleFilter.has(node.role.toLowerCase()) ||
+        this.#roleFilter.has(normalizedRole)
+      );
+    }
+    if (this.#options.formsOnly) {
+      if (node.id && node.id === this.#snapshot.selectedElementUid) {
+        return true;
+      }
+      if (node.role && FORM_CONTROL_ROLES.has(node.role.toLowerCase())) {
+        return true;
+      }
+      const record = node as unknown as Record<string, unknown>;
+      return record.editable === true || record.focused === true;
+    }
+    if (this.#options.interactiveOnly) {
+      return this.#isInteractiveNode(node);
+    }
+    return true;
+  }
+
+  #getEmptyFilterMessage(root: TextSnapshotNode): string | undefined {
+    if (!this.#roleFilter && !this.#options.formsOnly) {
+      return undefined;
+    }
+    if (this.#matchesFilter(root)) {
+      return undefined;
+    }
+    if (this.#getEffectiveChildren(root).length > 0) {
+      return undefined;
+    }
+    const target = root.id ? `uid=${root.id}` : 'root';
+    if (this.#roleFilter && this.#options.roles) {
+      return `No matching nodes found for roles [${this.#options.roles.join(', ')}] under ${target}. Retry take_snapshot without roles to inspect the full tree.\n`;
+    }
+    return `No matching form/action nodes found for formsOnly under ${target}. Retry take_snapshot without formsOnly (or with outlineOnly: true) to inspect the full tree.\n`;
+  }
+
+  #isOutlineFallback(root: TextSnapshotNode): boolean {
+    if (!this.#options.outlineOnly) {
+      return false;
+    }
+    return this.#getEffectiveChildren(root).length === 0;
+  }
+
+  #formatOutlineFallback(root: TextSnapshotNode): string {
+    const target = root.id ? `uid=${root.id}` : 'root';
+    const lines: string[] = [
+      `Note: No landmarks or headings found under ${target}. Use rootUid or omit outlineOnly for full snapshot.\n`,
+    ];
+    if (this.#options.maxDepth !== undefined && this.#options.maxDepth <= 0) {
+      return lines.join('');
+    }
+    for (const child of root.children) {
+      if (child.role === 'StaticText') {
+        continue;
+      }
+      const attributes = this.#getAttributes(child);
+      lines.push(
+        `  ${attributes.join(' ')} [nodes=${countDescendants(child)}]\n`,
+      );
+    }
+    return lines.join('');
+  }
+
   #getEffectiveChildren(node: TextSnapshotNode): TextSnapshotNode[] {
-    if (!this.#options.interactiveOnly) {
+    if (!this.#hasNodeFilter()) {
       return node.children;
     }
     const result: TextSnapshotNode[] = [];
     for (const child of node.children) {
-      if (this.#isInteractiveNode(child)) {
+      if (this.#matchesFilter(child)) {
         result.push(child);
       } else {
         result.push(...this.#getEffectiveChildren(child));
@@ -117,9 +278,13 @@ Get a verbose snapshot to include all elements if you are interested in the sele
   #formatNode(node: TextSnapshotNode, depth = 0): string {
     const chunks: string[] = [];
     const attributes = this.#getAttributes(node);
+    const nodeCountSuffix = this.#options.outlineOnly
+      ? ` [nodes=${countDescendants(node)}]`
+      : '';
     const line =
       ' '.repeat(depth * 2) +
       attributes.join(' ') +
+      nodeCountSuffix +
       (node.id && node.id === this.#snapshot.selectedElementUid
         ? ' [selected in the DevTools Elements panel]'
         : '') +
@@ -168,6 +333,9 @@ Get a verbose snapshot to include all elements if you are interested in the sele
             this.#nodeToJSON(child, depth + 1),
           );
     const result: Record<string, unknown> = structuredClone(rawAttrs);
+    if (this.#options.outlineOnly) {
+      result.nodeCount = countDescendants(node);
+    }
     if (children.length > 0) {
       result.children = children;
     }
@@ -313,4 +481,12 @@ function findNodeByUid(
     }
   }
   return undefined;
+}
+
+function countDescendants(node: TextSnapshotNode): number {
+  let count = 0;
+  for (const child of node.children) {
+    count += 1 + countDescendants(child);
+  }
+  return count;
 }

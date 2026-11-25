@@ -56,6 +56,24 @@ in the DevTools Elements panel (if any).`,
       .describe(
         'If true, prune non-interactive wrapper nodes while preserving interactive elements.',
       ),
+    roles: zod
+      .array(zod.string())
+      .optional()
+      .describe(
+        'Optional list of ARIA roles (case-insensitive) to filter snapshot nodes.',
+      ),
+    formsOnly: zod
+      .boolean()
+      .optional()
+      .describe(
+        'If true, filter to form controls and action buttons while excluding normal navigation links.',
+      ),
+    outlineOnly: zod
+      .boolean()
+      .optional()
+      .describe(
+        'If true, return only RootWebArea, landmarks, and headings with subtree node counts.',
+      ),
   },
   blockedByDialog: true,
   concurrency: 'page',
@@ -74,6 +92,15 @@ in the DevTools Elements panel (if any).`,
         : {}),
       ...(request.params.interactiveOnly !== undefined
         ? {interactiveOnly: request.params.interactiveOnly}
+        : {}),
+      ...(request.params.roles !== undefined
+        ? {roles: request.params.roles}
+        : {}),
+      ...(request.params.formsOnly !== undefined
+        ? {formsOnly: request.params.formsOnly}
+        : {}),
+      ...(request.params.outlineOnly !== undefined
+        ? {outlineOnly: request.params.outlineOnly}
         : {}),
     });
   },

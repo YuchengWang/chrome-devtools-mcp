@@ -188,6 +188,9 @@ export interface SnapshotParams {
   rootUid?: string;
   maxDepth?: number;
   interactiveOnly?: boolean;
+  roles?: string[];
+  formsOnly?: boolean;
+  outlineOnly?: boolean;
 }
 
 export interface LighthouseAuditNode {

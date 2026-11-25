@@ -584,6 +584,9 @@ export class McpResponse implements Response {
       rootUid: this.#snapshotParams.rootUid,
       maxDepth: this.#snapshotParams.maxDepth,
       interactiveOnly: this.#snapshotParams.interactiveOnly,
+      roles: this.#snapshotParams.roles,
+      formsOnly: this.#snapshotParams.formsOnly,
+      outlineOnly: this.#snapshotParams.outlineOnly,
     });
     if (this.#snapshotParams.filePath) {
       const result = await context.saveFile(

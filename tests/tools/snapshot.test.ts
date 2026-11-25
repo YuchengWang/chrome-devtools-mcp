@@ -60,6 +60,29 @@ describe('snapshot', () => {
         interactiveOnly: true,
       });
     });
+
+    it('forwards roles, formsOnly, and outlineOnly parameters', async () => {
+      const {page, context, response, args} = createHandlerMocks();
+      await takeSnapshot(args).handler(
+        {
+          params: {
+            roles: ['button', 'textbox'],
+            formsOnly: true,
+            outlineOnly: true,
+          },
+          page,
+        },
+        response,
+        context,
+      );
+      sinon.assert.calledOnceWithExactly(response.includeSnapshot, {
+        verbose: false,
+        filePath: undefined,
+        roles: ['button', 'textbox'],
+        formsOnly: true,
+        outlineOnly: true,
+      });
+    });
   });
 
   describe('wait_for', () => {

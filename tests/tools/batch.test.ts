@@ -46,7 +46,13 @@ describe('batch_actions', () => {
             {type: 'evaluate_script', function: '() => ({ok: true})'},
           ],
           includeSnapshot: true,
-          snapshotOptions: {interactiveOnly: true, maxDepth: 3},
+          snapshotOptions: {
+            interactiveOnly: true,
+            maxDepth: 3,
+            roles: ['button'],
+            formsOnly: true,
+            outlineOnly: false,
+          },
         },
         page,
       },
@@ -67,6 +73,9 @@ describe('batch_actions', () => {
       verbose: false,
       interactiveOnly: true,
       maxDepth: 3,
+      roles: ['button'],
+      formsOnly: true,
+      outlineOnly: false,
     });
   });
 

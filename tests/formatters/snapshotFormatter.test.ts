@@ -595,4 +595,215 @@ describe('snapshotFormatter', () => {
       ],
     });
   });
+
+  it('supports formsOnly and excludes normal navigation links', () => {
+    const tree = createNode('1_0', 'RootWebArea', 'Checkout', [
+      createNode('1_1', 'navigation', 'Nav', [
+        {
+          ...createNode('1_2', 'link', 'Home'),
+          focused: false,
+        } as TextSnapshotNode,
+      ]),
+      createNode('1_3', 'main', 'Main', [
+        createNode('1_4', 'textbox', 'Email'),
+        createNode('1_5', 'combobox', 'Country'),
+        createNode('1_6', 'checkbox', 'Subscribe'),
+        {
+          ...createNode('1_7', 'generic', 'Custom Input'),
+          editable: true,
+        } as TextSnapshotNode,
+        {
+          ...createNode('1_8', 'generic', 'Focused Item'),
+          focused: true,
+        } as TextSnapshotNode,
+        createNode('1_9', 'button', 'Submit'),
+      ]),
+    ]);
+
+    const formatter = new SnapshotFormatter(
+      {root: tree, verbose: false} as TextSnapshot,
+      {formsOnly: true},
+    );
+    assert.strictEqual(
+      formatter.toString(),
+      `uid=1_0 RootWebArea "Checkout"
+  uid=1_4 textbox "Email"
+  uid=1_5 combobox "Country"
+  uid=1_6 checkbox "Subscribe"
+  uid=1_7 generic "Custom Input" editable
+  uid=1_8 generic "Focused Item" focusable focused
+  uid=1_9 button "Submit"
+`,
+    );
+  });
+
+  it('supports case-insensitive roles filter with rootUid and maxDepth and empty fallback', () => {
+    const tree = createNode('1_0', 'RootWebArea', 'Page', [
+      createNode('1_1', 'main', 'Main', [
+        createNode('1_2', 'heading', 'Title'),
+        createNode('1_3', 'link', 'Docs'),
+        createNode('1_4', 'generic', '', [
+          createNode('1_5', 'button', 'Save'),
+          createNode('1_6', 'generic', '', [
+            createNode('1_7', 'button', 'Nested'),
+          ]),
+        ]),
+      ]),
+    ]);
+
+    const rolesFiltered = new SnapshotFormatter(
+      {root: tree, verbose: false} as TextSnapshot,
+      {rootUid: '1_1', maxDepth: 1, roles: ['Button', 'HEADING']},
+    );
+    assert.strictEqual(
+      rolesFiltered.toString(),
+      `uid=1_1 main "Main"
+  uid=1_2 heading "Title"
+  uid=1_5 button "Save"
+  uid=1_7 button "Nested"
+`,
+    );
+    assert.deepStrictEqual(rolesFiltered.toJSON(), {
+      id: '1_1',
+      role: 'main',
+      name: 'Main',
+      children: [
+        {id: '1_2', role: 'heading', name: 'Title'},
+        {id: '1_5', role: 'button', name: 'Save'},
+        {id: '1_7', role: 'button', name: 'Nested'},
+      ],
+    });
+
+    const emptyRoles = new SnapshotFormatter(
+      {root: tree, verbose: false} as TextSnapshot,
+      {rootUid: '1_1', roles: ['dialog']},
+    );
+    assert.ok(
+      emptyRoles
+        .toString()
+        .includes('No matching nodes found for roles [dialog] under uid=1_1'),
+    );
+    assert.deepStrictEqual(emptyRoles.toJSON(), {
+      id: '1_1',
+      role: 'main',
+      name: 'Main',
+      empty: true,
+      message:
+        'No matching nodes found for roles [dialog] under uid=1_1. Retry take_snapshot without roles to inspect the full tree.',
+    });
+
+    const emptyForms = new SnapshotFormatter(
+      {root: createNode('2_0', 'RootWebArea', 'Article', [createNode('2_1', 'link', 'Read')]), verbose: false} as TextSnapshot,
+      {formsOnly: true},
+    );
+    assert.ok(
+      emptyForms
+        .toString()
+        .includes('No matching form/action nodes found for formsOnly under uid=2_0'),
+    );
+  });
+
+  it('supports outlineOnly with node counts and fallback when no landmarks or headings exist', () => {
+    const tree = createNode('1_0', 'RootWebArea', 'App', [
+      createNode('1_1', 'navigation', 'TopNav', [
+        createNode('1_2', 'link', 'Home'),
+        createNode('1_3', 'link', 'About'),
+      ]),
+      createNode('1_4', 'main', 'Main', [
+        createNode('1_5', 'heading', 'Dashboard'),
+        createNode('1_6', 'form', 'SearchForm', [
+          createNode('1_7', 'textbox', 'Query'),
+          createNode('1_8', 'button', 'Go'),
+        ]),
+      ]),
+    ]);
+
+    const outline = new SnapshotFormatter(
+      {root: tree, verbose: false} as TextSnapshot,
+      {outlineOnly: true},
+    );
+    assert.strictEqual(
+      outline.toString(),
+      `uid=1_0 RootWebArea "App" [nodes=8]
+  uid=1_1 navigation "TopNav" [nodes=2]
+  uid=1_4 main "Main" [nodes=4]
+    uid=1_5 heading "Dashboard" [nodes=0]
+    uid=1_6 form "SearchForm" [nodes=2]
+`,
+    );
+    assert.deepStrictEqual(outline.toJSON(), {
+      id: '1_0',
+      role: 'RootWebArea',
+      name: 'App',
+      nodeCount: 8,
+      children: [
+        {
+          id: '1_1',
+          role: 'navigation',
+          name: 'TopNav',
+          nodeCount: 2,
+        },
+        {
+          id: '1_4',
+          role: 'main',
+          name: 'Main',
+          nodeCount: 4,
+          children: [
+            {
+              id: '1_5',
+              role: 'heading',
+              name: 'Dashboard',
+              nodeCount: 0,
+            },
+            {
+              id: '1_6',
+              role: 'form',
+              name: 'SearchForm',
+              nodeCount: 2,
+            },
+          ],
+        },
+      ],
+    });
+
+    const plainTree = createNode('3_0', 'RootWebArea', 'Plain', [
+      createNode('3_1', 'generic', 'Wrapper', [
+        createNode('3_2', 'paragraph', 'Hello'),
+      ]),
+      createNode('3_3', 'button', 'OK'),
+    ]);
+    const fallbackOutline = new SnapshotFormatter(
+      {root: plainTree, verbose: false} as TextSnapshot,
+      {outlineOnly: true},
+    );
+    assert.strictEqual(
+      fallbackOutline.toString(),
+      `uid=3_0 RootWebArea "Plain" [nodes=3]
+Note: No landmarks or headings found under uid=3_0. Use rootUid or omit outlineOnly for full snapshot.
+  uid=3_1 generic "Wrapper" [nodes=1]
+  uid=3_3 button "OK" [nodes=0]
+`,
+    );
+    assert.deepStrictEqual(fallbackOutline.toJSON(), {
+      id: '3_0',
+      role: 'RootWebArea',
+      name: 'Plain',
+      nodeCount: 3,
+      outlineFallback: true,
+      children: [
+        {
+          id: '3_1',
+          role: 'generic',
+          name: 'Wrapper',
+          nodeCount: 1,
+        },
+        {
+          id: '3_3',
+          role: 'button',
+          name: 'OK',
+          nodeCount: 0,
+        },
+      ],
+    });
+  });
 });

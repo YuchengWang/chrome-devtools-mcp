@@ -38,6 +38,7 @@ import {loadTraceAsBuffer} from './trace-processing/fixtures/load.js';
 import {
   createHandlerMocks,
   createMockConsoleMessage,
+  createMockDialog,
   createMockHeapSnapshotAggregate,
   createMockCDPSession,
   createMockCSSMatchedStyles,
@@ -2564,6 +2565,90 @@ describe('McpResponse heap snapshot formatting', () => {
       assert.strictEqual(
         Reflect.get(structuredContent, 'commentsSnapshotRegenerated'),
         undefined,
+      );
+    });
+  });
+
+  describe('queued dialogs, file choosers, and auth challenges', () => {
+    it('surfaces multi-slot dialogs, pending file choosers, and auth challenges', async () => {
+      const response = new McpResponse(createMockServerConfig());
+      const page = createMockMcpPage();
+      const firstDialog = createMockDialog({type: 'alert', message: 'First'});
+      const secondDialog = createMockDialog({
+        type: 'confirm',
+        message: 'Second',
+      });
+      page.getDialog.returns(firstDialog);
+      page.getDialogs.returns([
+        {
+          id: 1,
+          index: 0,
+          dialog: firstDialog,
+          type: 'alert',
+          message: 'First',
+          defaultValue: '',
+          createdAt: 100,
+        },
+        {
+          id: 2,
+          index: 1,
+          dialog: secondDialog,
+          type: 'confirm',
+          message: 'Second',
+          defaultValue: '',
+          createdAt: 101,
+        },
+      ]);
+      page.getPendingFileChoosers.returns([
+        {
+          id: 7,
+          frameId: 'frame-1',
+          mode: 'selectMultiple',
+          backendNodeId: 88,
+          createdAt: 200,
+        },
+      ]);
+      page.getPendingAuthChallenges.returns([
+        {
+          challengeId: 'auth-1',
+          requestId: 'req-1',
+          url: 'https://private.example.com/data',
+          method: 'GET',
+          resourceType: 'XHR',
+          frameId: 'frame-1',
+          source: 'Server',
+          origin: 'https://private.example.com',
+          scheme: 'Basic',
+          realm: 'Vault',
+          createdAt: 300,
+          status: 'pending',
+        },
+      ]);
+      response.setPage(page);
+
+      const context = createMockMcpContext();
+      const {content, structuredContent} = await response.handle(context);
+      const text = getTextContent(content[0]);
+
+      assert.match(text, /Queued dialogs: 2/);
+      assert.match(text, /# Pending file chooser/);
+      assert.match(text, /mode=selectMultiple/);
+      assert.match(text, /# Pending auth challenge/);
+      assert.match(text, /auth-1: Server Basic realm="Vault"/);
+
+      assert.strictEqual(
+        (Reflect.get(structuredContent, 'dialogs') as unknown[]).length,
+        2,
+      );
+      assert.strictEqual(
+        (Reflect.get(structuredContent, 'pendingFileChoosers') as unknown[])
+          .length,
+        1,
+      );
+      assert.strictEqual(
+        (Reflect.get(structuredContent, 'pendingAuthChallenges') as unknown[])
+          .length,
+        1,
       );
     });
   });

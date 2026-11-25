@@ -25,6 +25,12 @@ function readContent(filePath: string): string | undefined {
   }
 }
 
+export interface ConfigWatcherOptions {
+  debounceMs?: number;
+  allowMissing?: boolean;
+  onDelete?: () => Promise<void> | void;
+}
+
 /**
  * Watches a config file and calls `onChange` with the new content after it was
  * modified.
@@ -42,6 +48,8 @@ export class ConfigWatcher implements Disposable {
   readonly #configPath: string;
   readonly #onChange: (content: string) => Promise<void>;
   readonly #debounceMs: number;
+  readonly #allowMissing: boolean;
+  readonly #onDelete?: () => Promise<void> | void;
   #watcher?: fs.FSWatcher;
   #debounced?: ReturnType<typeof Debouncer.debounce>;
   #content?: string;
@@ -50,26 +58,74 @@ export class ConfigWatcher implements Disposable {
   constructor(
     configPath: string,
     onChange: (content: string) => Promise<void>,
-    options: {debounceMs?: number} = {},
+    options: ConfigWatcherOptions = {},
   ) {
     this.#configPath = configPath;
     this.#onChange = onChange;
     this.#debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+    this.#allowMissing = options.allowMissing ?? false;
+    this.#onDelete = options.onDelete;
   }
 
   /**
-   * Starts watching the config file. Throws if `configPath` does not exist.
+   * Starts watching the config file. Throws if `configPath` does not exist
+   * unless `allowMissing` is enabled.
    */
   start(): void {
     if (this.#watcher) {
       return;
     }
-    const realPath = fs.realpathSync(this.#configPath);
-    const fileName = path.basename(realPath);
-    this.#content = readContent(realPath);
+    let watchDir: string;
+    let fileName: string;
+    let targetPath: string;
+    if (!this.#allowMissing) {
+      targetPath = fs.realpathSync(this.#configPath);
+      watchDir = path.dirname(targetPath);
+      fileName = path.basename(targetPath);
+      this.#content = readContent(targetPath);
+    } else {
+      try {
+        targetPath = fs.realpathSync(this.#configPath);
+        watchDir = path.dirname(targetPath);
+        fileName = path.basename(targetPath);
+        this.#content = readContent(targetPath);
+      } catch {
+        const resolved = path.resolve(this.#configPath);
+        try {
+          watchDir = fs.realpathSync(path.dirname(resolved));
+        } catch {
+          // Neither the file nor its parent directory exists; degrade gracefully.
+          return;
+        }
+        fileName = path.basename(resolved);
+        targetPath = path.join(watchDir, fileName);
+        this.#content = undefined;
+      }
+    }
+
     this.#debounced = Debouncer.debounce(() => {
-      const content = readContent(realPath);
-      if (content === undefined || content === this.#content) {
+      let currentPath = targetPath;
+      try {
+        currentPath = fs.realpathSync(this.#configPath);
+      } catch {
+        // File may not exist yet or was removed.
+      }
+      const content = readContent(currentPath);
+      if (content === undefined) {
+        if (this.#allowMissing && this.#content !== undefined) {
+          this.#content = undefined;
+          if (this.#onDelete) {
+            const onDelete = this.#onDelete;
+            this.#pending = this.#pending
+              .then(() => onDelete())
+              .catch(err => {
+                console.error(`Failed to reset ${this.#configPath}:`, err);
+              });
+          }
+        }
+        return;
+      }
+      if (content === this.#content) {
         return;
       }
       this.#content = content;
@@ -80,7 +136,7 @@ export class ConfigWatcher implements Disposable {
         });
     }, this.#debounceMs);
     this.#watcher = fs.watch(
-      path.dirname(realPath),
+      watchDir,
       {persistent: false},
       (_eventType, changedFileName) => {
         if (changedFileName !== null && changedFileName !== fileName) {
@@ -95,7 +151,7 @@ export class ConfigWatcher implements Disposable {
       );
       this.dispose();
     });
-    logger?.(`Watching ${realPath} for config changes`);
+    logger?.(`Watching ${targetPath} for config changes`);
   }
 
   dispose(): void {

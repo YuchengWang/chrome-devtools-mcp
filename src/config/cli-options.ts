@@ -1339,9 +1339,101 @@ export const commands: Commands = {
       },
     },
   },
+  handle_auth_challenge: {
+    description:
+      'Inspect, respond to, or configure runtime policy for HTTP 401/407 authentication challenges captured via CDP Fetch.authRequired.',
+    category: 'Network',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      action: {
+        name: 'action',
+        type: 'string',
+        description:
+          'Action: provide credentials, cancel auth, use browser default, list pending/history, or set runtime default/rule policy.',
+        required: true,
+        positional: true,
+        enum: ['provide', 'cancel', 'default', 'list', 'set_policy'],
+      },
+      challengeId: {
+        name: 'challengeId',
+        type: 'string',
+        description:
+          'Target challenge ID (defaults to oldest pending challenge).',
+        required: false,
+        positional: false,
+      },
+      username: {
+        name: 'username',
+        type: 'string',
+        description: 'Username for action="provide" or runtime provide rule.',
+        required: false,
+        positional: false,
+      },
+      password: {
+        name: 'password',
+        type: 'string',
+        description: 'Password for action="provide" or runtime provide rule.',
+        required: false,
+        positional: false,
+      },
+      defaultAction: {
+        name: 'defaultAction',
+        type: 'string',
+        description: 'Default runtime auth policy when action="set_policy".',
+        required: false,
+        positional: false,
+        enum: ['cancel', 'default', 'queue'],
+      },
+      originRegex: {
+        name: 'originRegex',
+        type: 'string',
+        description:
+          'Optional regex matching auth origin when action="set_policy".',
+        required: false,
+        positional: false,
+      },
+      urlRegex: {
+        name: 'urlRegex',
+        type: 'string',
+        description:
+          'Optional regex matching request URL when action="set_policy".',
+        required: false,
+        positional: false,
+      },
+      realmRegex: {
+        name: 'realmRegex',
+        type: 'string',
+        description:
+          'Optional regex matching auth realm when action="set_policy".',
+        required: false,
+        positional: false,
+      },
+      source: {
+        name: 'source',
+        type: 'string',
+        description: 'Auth source filter when action="set_policy".',
+        required: false,
+        positional: false,
+        enum: ['Server', 'Proxy'],
+      },
+      queueTimeoutMs: {
+        name: 'queueTimeoutMs',
+        type: 'integer',
+        description: 'Timeout ms for queued challenges before auto-canceling.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
   handle_dialog: {
     description:
-      'If a browser dialog was opened, use this command to handle it',
+      'If one or more browser dialogs are open in the queue, use this command to handle them.',
     category: 'Input automation',
     args: {
       pageId: {
@@ -1363,6 +1455,69 @@ export const commands: Commands = {
         name: 'promptText',
         type: 'string',
         description: 'Optional prompt text to enter into the dialog.',
+        required: false,
+        positional: false,
+      },
+      slotIndex: {
+        name: 'slotIndex',
+        type: 'integer',
+        description:
+          'Zero-based queue slot index to handle when multiple dialogs are queued (default: 0).',
+        required: false,
+        positional: false,
+      },
+      all: {
+        name: 'all',
+        type: 'boolean',
+        description: 'Handle all currently queued dialogs in FIFO order.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  handle_file_chooser: {
+    description:
+      'Enable/disable Page.fileChooserOpened interception, list queued choosers, or accept (with filePaths) / cancel an intercepted chooser without blocking the browser.',
+    category: 'Input automation',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      action: {
+        name: 'action',
+        type: 'string',
+        description:
+          'Action: enable or disable file chooser interception, list queued choosers (auto-enables interception if unset), accept a pending chooser with filePaths, or cancel it.',
+        required: true,
+        positional: true,
+        enum: ['accept', 'cancel', 'list', 'enable', 'disable'],
+      },
+      index: {
+        name: 'index',
+        type: 'integer',
+        description:
+          'Zero-based index in the pending file chooser queue (default: 0).',
+        required: false,
+        positional: false,
+      },
+      filePaths: {
+        name: 'filePaths',
+        type: 'array',
+        description:
+          'One or more local file paths when action="accept". Paths must be local to the browser instance.',
+        required: false,
+        positional: false,
+        minItems: 1,
+      },
+      includeSnapshot: {
+        name: 'includeSnapshot',
+        type: 'boolean',
+        description:
+          'Whether to include a snapshot in the response. Default is false.',
         required: false,
         positional: false,
       },
@@ -1583,6 +1738,28 @@ export const commands: Commands = {
       },
     },
   },
+  list_downloads: {
+    description:
+      'List tracked browser downloads captured via CDP Browser.downloadWillBegin and Browser.downloadProgress.',
+    category: 'Network',
+    args: {
+      state: {
+        name: 'state',
+        type: 'string',
+        description: 'Filter downloads by state.',
+        required: false,
+        positional: false,
+        enum: ['inProgress', 'completed', 'canceled'],
+      },
+      limit: {
+        name: 'limit',
+        type: 'integer',
+        description: 'Maximum number of recent downloads to return.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
   list_extensions: {
     description:
       'Lists the unpacked Chrome extensions loaded in the browser. This includes their name, ID, version, and enabled status. Extensions installed from the Chrome Web Store are not included.',
@@ -1661,6 +1838,36 @@ export const commands: Commands = {
         description: 'Targets a specific page by ID.',
         required: true,
         positional: true,
+      },
+    },
+  },
+  list_websocket_connections: {
+    description:
+      'List active and recently tracked WebSocket connections captured via CDP on the selected page.',
+    category: 'Network',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      status: {
+        name: 'status',
+        type: 'string',
+        description: 'Filter WebSocket connections by current status.',
+        required: false,
+        positional: false,
+        enum: ['connecting', 'open', 'closed', 'error'],
+      },
+      urlPattern: {
+        name: 'urlPattern',
+        type: 'string',
+        description:
+          'Optional URL filter (wildcard substring or /regex/flags) to narrow connections.',
+        required: false,
+        positional: false,
       },
     },
   },
@@ -1941,6 +2148,243 @@ export const commands: Commands = {
         type: 'string',
         description:
           'The absolute file path, or a file path relative to the current working directory, to save the raw trace data. For example, trace.json.gz (compressed) or trace.json (uncompressed).',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  poll_monitor_events: {
+    description:
+      'Inspect status and poll events matched by hot-reloaded ~/.config/cua-ycwang/network_monitors.json rules.',
+    category: 'Network',
+    args: {
+      monitorId: {
+        name: 'monitorId',
+        type: 'string',
+        description: 'Filter buffered events by monitor rule id.',
+        required: false,
+        positional: false,
+      },
+      type: {
+        name: 'type',
+        type: 'string',
+        description: 'Filter buffered events by source type.',
+        required: false,
+        positional: false,
+        enum: ['xhr', 'fetch', 'ws', 'sse'],
+      },
+      urlPattern: {
+        name: 'urlPattern',
+        type: 'string',
+        description:
+          'Optional URL filter (wildcard substring or /regex/flags).',
+        required: false,
+        positional: false,
+      },
+      sinceSeq: {
+        name: 'sinceSeq',
+        type: 'integer',
+        description: 'Return events strictly after this sequence number.',
+        required: false,
+        positional: false,
+      },
+      limit: {
+        name: 'limit',
+        type: 'integer',
+        description:
+          'Maximum number of monitor events to return (default: 50).',
+        required: false,
+        positional: false,
+      },
+      flush: {
+        name: 'flush',
+        type: 'boolean',
+        description:
+          'Flush pending JSONL file writes before returning results.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  poll_network_alerts: {
+    description:
+      'Poll captured network failures (Network.loadingFailed), HTTP 4xx/5xx responses, and DevTools CORS/CSP/MixedContent audit issues (Audits.issueAdded).',
+    category: 'Network',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      kinds: {
+        name: 'kinds',
+        type: 'array',
+        description: 'Filter alerts by alert kind.',
+        required: false,
+        positional: false,
+      },
+      categories: {
+        name: 'categories',
+        type: 'array',
+        description:
+          'Filter alerts by category (e.g. cors, csp, http_4xx, auth).',
+        required: false,
+        positional: false,
+      },
+      urlPattern: {
+        name: 'urlPattern',
+        type: 'string',
+        description:
+          'Optional URL filter (wildcard substring or /regex/flags).',
+        required: false,
+        positional: false,
+      },
+      includeCanceled: {
+        name: 'includeCanceled',
+        type: 'boolean',
+        description:
+          'Include canceled Network.loadingFailed alerts (default: true).',
+        required: false,
+        positional: false,
+      },
+      sinceSeq: {
+        name: 'sinceSeq',
+        type: 'integer',
+        description: 'Return alerts strictly after this sequence number.',
+        required: false,
+        positional: false,
+      },
+      unreadOnly: {
+        name: 'unreadOnly',
+        type: 'boolean',
+        description:
+          'When true, advance and read from the per-buffer unread cursor.',
+        required: false,
+        positional: false,
+      },
+      limit: {
+        name: 'limit',
+        type: 'integer',
+        description: 'Maximum number of alerts to return (default: 50).',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  poll_sse_events: {
+    description:
+      'Poll captured Server-Sent Events (EventSource messages) from the bounded CDP ring buffer on the selected page.',
+    category: 'Network',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      requestId: {
+        name: 'requestId',
+        type: 'string',
+        description: 'Filter SSE events by a specific CDP requestId.',
+        required: false,
+        positional: false,
+      },
+      urlPattern: {
+        name: 'urlPattern',
+        type: 'string',
+        description:
+          'Optional URL filter (wildcard substring or /regex/flags).',
+        required: false,
+        positional: false,
+      },
+      eventName: {
+        name: 'eventName',
+        type: 'string',
+        description: 'Filter by SSE eventName (e.g. "message", "update").',
+        required: false,
+        positional: false,
+      },
+      sinceSeq: {
+        name: 'sinceSeq',
+        type: 'integer',
+        description: 'Return events strictly after this sequence number.',
+        required: false,
+        positional: false,
+      },
+      unreadOnly: {
+        name: 'unreadOnly',
+        type: 'boolean',
+        description:
+          'When true, advance and read from the per-buffer unread cursor.',
+        required: false,
+        positional: false,
+      },
+      limit: {
+        name: 'limit',
+        type: 'integer',
+        description: 'Maximum number of SSE events to return (default: 50).',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  poll_ws_frames: {
+    description:
+      'Poll captured WebSocket frames (sent/received/error) from the bounded CDP ring buffer on the selected page.',
+    category: 'Network',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      requestId: {
+        name: 'requestId',
+        type: 'string',
+        description: 'Filter frames by a specific WebSocket requestId.',
+        required: false,
+        positional: false,
+      },
+      urlPattern: {
+        name: 'urlPattern',
+        type: 'string',
+        description:
+          'Optional URL filter (wildcard substring or /regex/flags).',
+        required: false,
+        positional: false,
+      },
+      direction: {
+        name: 'direction',
+        type: 'string',
+        description: 'Filter frames by direction. Defaults to "all".',
+        required: false,
+        positional: false,
+        enum: ['sent', 'received', 'error', 'all'],
+      },
+      sinceSeq: {
+        name: 'sinceSeq',
+        type: 'integer',
+        description: 'Return frames strictly after this sequence number.',
+        required: false,
+        positional: false,
+      },
+      unreadOnly: {
+        name: 'unreadOnly',
+        type: 'boolean',
+        description:
+          'When true, advance and read from the per-buffer unread cursor.',
+        required: false,
+        positional: false,
+      },
+      limit: {
+        name: 'limit',
+        type: 'integer',
+        description: 'Maximum number of frames to return (default: 50).',
         required: false,
         positional: false,
       },
@@ -2512,6 +2956,282 @@ export const commands: Commands = {
         type: 'boolean',
         description:
           'Whether to include a snapshot in the response. Default is false.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  wait_for_dialog: {
+    description:
+      'Wait for a browser dialog (alert/confirm/prompt/beforeunload) or resolve immediately with a queued dialog, optionally accepting or dismissing it.',
+    category: 'Input automation',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      type: {
+        name: 'type',
+        type: 'string',
+        description: 'Filter by expected dialog type.',
+        required: false,
+        positional: false,
+        enum: ['alert', 'confirm', 'prompt', 'beforeunload'],
+      },
+      messageRegex: {
+        name: 'messageRegex',
+        type: 'string',
+        description: 'Optional regex matched against the dialog message.',
+        required: false,
+        positional: false,
+      },
+      timeoutMs: {
+        name: 'timeoutMs',
+        type: 'integer',
+        description: 'Timeout in milliseconds (default: 10000).',
+        required: false,
+        positional: false,
+      },
+      action: {
+        name: 'action',
+        type: 'string',
+        description:
+          'Optional action to run immediately on the matched dialog if it was queued rather than auto-handled.',
+        required: false,
+        positional: false,
+        enum: ['accept', 'dismiss'],
+      },
+      promptText: {
+        name: 'promptText',
+        type: 'string',
+        description:
+          'Prompt input text when action="accept" on a prompt dialog.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  wait_for_dom: {
+    description:
+      'Wait for DOM elements matching a CSS selector (supports Open Shadow DOM `>>>` piercing) and optional frameId, visibility/detachment state, text/textRegex, or attribute assertions.',
+    category: 'Navigation automation',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      selector: {
+        name: 'selector',
+        type: 'string',
+        description:
+          'CSS selector, or Open Shadow DOM piercing path using `>>>` (e.g. `host-el >>> shadow-child >>> button.primary`).',
+        required: true,
+        positional: true,
+      },
+      state: {
+        name: 'state',
+        type: 'string',
+        description: 'DOM state to wait for (default: "visible").',
+        required: false,
+        positional: false,
+        enum: ['visible', 'hidden', 'attached', 'detached'],
+      },
+      frameId: {
+        name: 'frameId',
+        type: 'string',
+        description:
+          'Target frameId to restrict lookup; when omitted, searches main frame and all child frames.',
+        required: false,
+        positional: false,
+      },
+      text: {
+        name: 'text',
+        type: 'string',
+        description:
+          'Optional case-sensitive substring required inside element text.',
+        required: false,
+        positional: false,
+      },
+      textRegex: {
+        name: 'textRegex',
+        type: 'string',
+        description: 'Optional regex matched against element text.',
+        required: false,
+        positional: false,
+      },
+      attributeName: {
+        name: 'attributeName',
+        type: 'string',
+        description:
+          'Optional DOM attribute name that must exist on the element.',
+        required: false,
+        positional: false,
+      },
+      attributeValue: {
+        name: 'attributeValue',
+        type: 'string',
+        description: 'Optional exact attribute value (requires attributeName).',
+        required: false,
+        positional: false,
+      },
+      timeout: {
+        name: 'timeout',
+        type: 'integer',
+        description:
+          'Maximum wait time in milliseconds. If set to 0, the default timeout will be used.',
+        required: false,
+        positional: false,
+      },
+      pollIntervalMs: {
+        name: 'pollIntervalMs',
+        type: 'integer',
+        description: 'Polling interval in milliseconds (default: 100).',
+        required: false,
+        positional: false,
+      },
+      includeSnapshot: {
+        name: 'includeSnapshot',
+        type: 'boolean',
+        description:
+          'Include an accessibility snapshot once the DOM condition passes.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  wait_for_download: {
+    description:
+      'Wait for a browser download to finish (or match an already completed download) and return its suggestedFilename and saved filePath.',
+    category: 'Network',
+    args: {
+      guid: {
+        name: 'guid',
+        type: 'string',
+        description: 'Specific download GUID to wait for.',
+        required: false,
+        positional: false,
+      },
+      filenameRegex: {
+        name: 'filenameRegex',
+        type: 'string',
+        description: 'Regular expression matched against suggestedFilename.',
+        required: false,
+        positional: false,
+      },
+      urlRegex: {
+        name: 'urlRegex',
+        type: 'string',
+        description: 'Regular expression matched against the download URL.',
+        required: false,
+        positional: false,
+      },
+      timeoutMs: {
+        name: 'timeoutMs',
+        type: 'integer',
+        description: 'Timeout in milliseconds (default: 30000).',
+        required: false,
+        positional: false,
+      },
+      includeExistingCompleted: {
+        name: 'includeExistingCompleted',
+        type: 'boolean',
+        description:
+          'If true (default), resolve immediately when a matching completed download already exists.',
+        required: false,
+        positional: false,
+      },
+      sinceTimestamp: {
+        name: 'sinceTimestamp',
+        type: 'number',
+        description: 'Only match downloads started at or after this epoch ms.',
+        required: false,
+        positional: false,
+      },
+    },
+  },
+  wait_for_network_response: {
+    description:
+      'Wait for an XHR/Fetch/network response matching urlRegex, method, and/or status, returning the body inline or saving large payloads to tmp/.',
+    category: 'Network',
+    args: {
+      pageId: {
+        name: 'pageId',
+        type: 'number',
+        description: 'Targets a specific page by ID.',
+        required: true,
+        positional: true,
+      },
+      urlRegex: {
+        name: 'urlRegex',
+        type: 'string',
+        description:
+          'Regular expression (raw or /pattern/flags) matched against the response URL. Defaults to matching all URLs.',
+        required: false,
+        positional: false,
+      },
+      method: {
+        name: 'method',
+        type: 'string',
+        description: 'HTTP method filter (e.g. GET, POST). Case-insensitive.',
+        required: false,
+        positional: false,
+      },
+      status: {
+        name: 'status',
+        type: 'integer',
+        description: 'Expected HTTP status code (e.g. 200, 201, 404).',
+        required: false,
+        positional: false,
+      },
+      resourceTypes: {
+        name: 'resourceTypes',
+        type: 'array',
+        description: 'Optional resource types filter (e.g. ["xhr", "fetch"]).',
+        required: false,
+        positional: false,
+      },
+      timeoutMs: {
+        name: 'timeoutMs',
+        type: 'integer',
+        description: 'Timeout in milliseconds (default: 15000).',
+        required: false,
+        positional: false,
+      },
+      includeRecentMs: {
+        name: 'includeRecentMs',
+        type: 'integer',
+        description:
+          'Check recently received responses within this lookback window in ms before waiting for new traffic (default: 0).',
+        required: false,
+        positional: false,
+      },
+      filePath: {
+        name: 'filePath',
+        type: 'string',
+        description:
+          'Optional output file path (.json or .txt) inside an allowed root or tmp/ to save the full body.',
+        required: false,
+        positional: false,
+      },
+      saveToTempFile: {
+        name: 'saveToTempFile',
+        type: 'boolean',
+        description:
+          'Force writing the response body to a temporary file under tmp/ even when small.',
+        required: false,
+        positional: false,
+      },
+      maxInlineChars: {
+        name: 'maxInlineChars',
+        type: 'integer',
+        description:
+          'Maximum inline body characters before spilling to a tmp/ file (default: 16384).',
         required: false,
         positional: false,
       },

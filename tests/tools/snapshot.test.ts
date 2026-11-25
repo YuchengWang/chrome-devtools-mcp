@@ -11,7 +11,7 @@ import sinon from 'sinon';
 
 import {McpResponse} from '../../src/McpResponse.js';
 import {TimeoutError} from '../../src/third_party/browser.js';
-import {takeSnapshot, waitFor} from '../../src/tools/snapshot.js';
+import {takeSnapshot, waitFor, waitForDom} from '../../src/tools/snapshot.js';
 import {createHandlerMocks, createMockServerConfig} from '../mocks.js';
 
 describe('snapshot', () => {
@@ -218,6 +218,76 @@ describe('snapshot', () => {
         timeout: 2000,
         visible: true,
       });
+    });
+  });
+
+  describe('wait_for_dom', () => {
+    it('forwards shadow/iframe selector, state, attribute, and snapshot flags', async () => {
+      const {page, context, response, args} = createHandlerMocks();
+      page.waitForDom.resolves({
+        matched: true,
+        selector: 'my-host >>> button.ready',
+        state: 'visible',
+        frameId: 'frame-sub',
+        count: 1,
+        visibleCount: 1,
+        tagName: 'button',
+        textPreview: 'Submit Order',
+        elapsedMs: 42,
+      });
+
+      await waitForDom(args).handler(
+        {
+          params: {
+            selector: 'my-host >>> button.ready',
+            state: 'visible',
+            frameId: 'frame-sub',
+            text: 'Submit',
+            textRegex: '^Submit\\s+Order$',
+            attributeName: 'data-ready',
+            attributeValue: 'true',
+            timeout: 3000,
+            pollIntervalMs: 50,
+            includeSnapshot: true,
+          },
+          page,
+        },
+        response,
+        context,
+      );
+
+      const arg = page.waitForDom.firstCall.args[0];
+      assert.strictEqual(arg.selector, 'my-host >>> button.ready');
+      assert.strictEqual(arg.frameId, 'frame-sub');
+      assert.ok(arg.textRegex instanceof RegExp);
+      assert.strictEqual(arg.attributeName, 'data-ready');
+      assert.strictEqual(arg.attributeValue, 'true');
+      sinon.assert.calledOnce(response.includeSnapshot);
+      assert.match(
+        response.appendResponseLine
+          .getCalls()
+          .map(c => c.args[0])
+          .join('\n'),
+        /DOM selector "my-host >>> button\.ready" matched state "visible" in frame frame-sub/,
+      );
+    });
+
+    it('rejects attributeValue without attributeName', async () => {
+      const {page, context, response, args} = createHandlerMocks();
+      await assert.rejects(
+        waitForDom(args).handler(
+          {
+            params: {
+              selector: 'div',
+              attributeValue: 'active',
+            },
+            page,
+          },
+          response,
+          context,
+        ),
+        /attributeName is required/,
+      );
     });
   });
 });

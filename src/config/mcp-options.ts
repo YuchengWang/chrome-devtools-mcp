@@ -48,6 +48,8 @@ export interface McpArguments
   javascriptEvaluation: boolean;
   fileNavigations: boolean;
   backgroundNewPages: boolean;
+  interceptDownloads: boolean;
+  interceptFileChooser: boolean;
   sourceMaps: boolean;
   maxNavigationSaved: number;
   clearcutEndpoint?: string;
@@ -218,6 +220,20 @@ export const mcpOptions: McpOptions = {
     default: false,
     describe:
       'Set to true to open every page created by new_page in the background, without bringing it to the front, whatever the tool call passes for background. Useful when several agents or the user share one visible browser and new tabs should not take focus.',
+    reloadable: true,
+  },
+  interceptDownloads: {
+    type: 'boolean',
+    default: false,
+    describe:
+      'Set to true to redirect browser downloads into a temporary directory and track them automatically on attach. By default this is enabled only for --isolated sessions or on demand when list_downloads / wait_for_download is called.',
+    reloadable: true,
+  },
+  interceptFileChooser: {
+    type: 'boolean',
+    default: false,
+    describe:
+      'Set to true to intercept Page.fileChooserOpened dialogs on every page automatically instead of letting native OS file pickers open. By default this is off until enabled via handle_file_chooser or network_monitors.json.',
     reloadable: true,
   },
   sourceMaps: {

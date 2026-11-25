@@ -5,6 +5,7 @@
  */
 
 import {loadBrowser, zod} from '../third_party/index.js';
+import {compileRegex, getErrorMessage} from '../utils/errorHandling.js';
 
 import {ToolCategory} from './categories.js';
 import {
@@ -161,5 +162,113 @@ export const waitFor: PageToolFactory = definePageTool(() => ({
     );
 
     response.includeSnapshot();
+  },
+}));
+
+export const waitForDom: PageToolFactory = definePageTool(() => ({
+  name: 'wait_for_dom',
+  description:
+    'Wait for DOM elements matching a CSS selector (supports Open Shadow DOM `>>>` piercing) and optional frameId, visibility/detachment state, text/textRegex, or attribute assertions.',
+  annotations: {
+    category: ToolCategory.NAVIGATION,
+    readOnlyHint: true,
+  },
+  schema: {
+    selector: zod
+      .string()
+      .min(1)
+      .describe(
+        'CSS selector, or Open Shadow DOM piercing path using `>>>` (e.g. `host-el >>> shadow-child >>> button.primary`).',
+      ),
+    state: zod
+      .enum(['visible', 'hidden', 'attached', 'detached'])
+      .optional()
+      .describe('DOM state to wait for (default: "visible").'),
+    frameId: zod
+      .string()
+      .optional()
+      .describe(
+        'Target frameId to restrict lookup; when omitted, searches main frame and all child frames.',
+      ),
+    text: zod
+      .string()
+      .optional()
+      .describe(
+        'Optional case-sensitive substring required inside element text.',
+      ),
+    textRegex: zod
+      .string()
+      .superRefine((value, ctx) => {
+        try {
+          compileRegex(value);
+        } catch (error) {
+          ctx.addIssue({
+            code: 'custom',
+            message: getErrorMessage(error),
+          });
+        }
+      })
+      .optional()
+      .describe('Optional regex matched against element text.'),
+    attributeName: zod
+      .string()
+      .optional()
+      .describe('Optional DOM attribute name that must exist on the element.'),
+    attributeValue: zod
+      .string()
+      .optional()
+      .describe('Optional exact attribute value (requires attributeName).'),
+    ...timeoutSchema,
+    pollIntervalMs: zod
+      .number()
+      .int()
+      .min(10)
+      .max(5000)
+      .optional()
+      .describe('Polling interval in milliseconds (default: 100).'),
+    includeSnapshot: zod
+      .boolean()
+      .optional()
+      .describe(
+        'Include an accessibility snapshot once the DOM condition passes.',
+      ),
+  },
+  blockedByDialog: true,
+  concurrency: 'page',
+  verifyFilesSchema: {},
+  handler: async (request, response) => {
+    const page = request.page;
+    if (
+      request.params.attributeValue !== undefined &&
+      !request.params.attributeName
+    ) {
+      throw new Error(
+        'attributeName is required when attributeValue is specified.',
+      );
+    }
+    const textRegex = request.params.textRegex
+      ? compileRegex(request.params.textRegex)
+      : undefined;
+    const result = await page.waitForDom({
+      selector: request.params.selector,
+      state: request.params.state,
+      frameId: request.params.frameId,
+      text: request.params.text,
+      textRegex,
+      attributeName: request.params.attributeName,
+      attributeValue: request.params.attributeValue,
+      timeoutMs: request.params.timeout,
+      pollIntervalMs: request.params.pollIntervalMs,
+    });
+    const elementDetails = result.tagName
+      ? `, first=<${result.tagName}>${result.textPreview ? ` "${result.textPreview}"` : ''}`
+      : '';
+    response.appendResponseLine(
+      `DOM selector "${result.selector}" matched state "${result.state}" in frame ${result.frameId} ` +
+        `(count=${result.count}, visibleCount=${result.visibleCount}, elapsedMs=${result.elapsedMs}${elementDetails}).`,
+    );
+    if (request.params.includeSnapshot) {
+      response.includeSnapshot();
+    }
   },
 }));

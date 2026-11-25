@@ -19,6 +19,7 @@ import {
   resizePage,
   handleDialog,
   getTabId,
+  waitForDialog,
 } from '../../src/tools/pages.js';
 import type {Dialog} from '../../src/third_party/browser.js';
 import {zod} from '../../src/third_party/index.js';
@@ -2098,6 +2099,151 @@ describe('pages', () => {
         assert.strictEqual(result.structuredContent.tabId, 'test-tab-id');
         assert.deepStrictEqual(response.responseLines, ['Tab ID: test-tab-id']);
       });
+    });
+  });
+
+  describe('dialog queue & detached frame recovery', () => {
+    it('handles queued dialogs by slotIndex and all=true', async () => {
+      const {page, response, context, args} = createHandlerMocks();
+      const d1 = createMockDialog({type: 'alert', message: 'one'});
+      const d2 = createMockDialog({type: 'confirm', message: 'two'});
+      page.getDialogs.returns([
+        {
+          id: 1,
+          index: 0,
+          dialog: d1,
+          type: 'alert',
+          message: 'one',
+          defaultValue: '',
+          createdAt: 1,
+        },
+        {
+          id: 2,
+          index: 1,
+          dialog: d2,
+          type: 'confirm',
+          message: 'two',
+          defaultValue: '',
+          createdAt: 2,
+        },
+      ]);
+
+      await handleDialog(args).handler(
+        {params: {action: 'accept', slotIndex: 1}, page},
+        response,
+        context,
+      );
+      sinon.assert.calledOnce(d2.accept);
+      sinon.assert.calledOnceWithExactly(page.clearDialog, d2);
+
+      const allResp = createHandlerMocks();
+      allResp.page.getDialogs.returns([
+        {
+          id: 1,
+          index: 0,
+          dialog: d1,
+          type: 'alert',
+          message: 'one',
+          defaultValue: '',
+          createdAt: 1,
+        },
+        {
+          id: 2,
+          index: 1,
+          dialog: d2,
+          type: 'confirm',
+          message: 'two',
+          defaultValue: '',
+          createdAt: 2,
+        },
+      ]);
+      await handleDialog(args).handler(
+        {params: {action: 'dismiss', all: true}, page: allResp.page},
+        allResp.response,
+        allResp.context,
+      );
+      sinon.assert.calledOnce(d1.dismiss);
+      sinon.assert.calledOnce(d2.dismiss);
+      assert.match(
+        allResp.response.appendResponseLine
+          .getCalls()
+          .map(c => c.args[0])
+          .join('\n'),
+        /dismissed 2 queued dialog/,
+      );
+    });
+
+    it('waits for dialog via wait_for_dialog and optionally handles it', async () => {
+      const {page, response, context, args} = createHandlerMocks();
+      const d = createMockDialog({type: 'confirm', message: 'Continue?'});
+      page.waitForDialog.resolves({
+        id: 4,
+        type: 'confirm',
+        message: 'Continue?',
+        defaultValue: '',
+        queueLength: 1,
+        autoHandled: false,
+      });
+      page.getDialogs.returns([
+        {
+          id: 4,
+          index: 0,
+          dialog: d,
+          type: 'confirm',
+          message: 'Continue?',
+          defaultValue: '',
+          createdAt: 10,
+        },
+      ]);
+
+      await waitForDialog(args).handler(
+        {
+          params: {
+            type: 'confirm',
+            messageRegex: 'Continue',
+            action: 'accept',
+          },
+          page,
+        },
+        response,
+        context,
+      );
+
+      sinon.assert.calledOnce(d.accept);
+      sinon.assert.calledOnceWithExactly(page.clearDialog, d);
+      assert.match(
+        response.appendResponseLine
+          .getCalls()
+          .map(c => c.args[0])
+          .join('\n'),
+        /Waited for and accepted confirm dialog \(#4\): "Continue\?"/,
+      );
+    });
+
+    it('self-heals detached frames during navigate_page', async () => {
+      const {page, response, context, args} = createHandlerMocks();
+      page.pptrPage.goto.rejects(new Error('Navigating frame was detached'));
+      context.rebindPageByTargetId.resolves({
+        recovered: true,
+        targetId: 'mock-target-id',
+        frameId: 'new-frame-9',
+        url: 'https://example.com/final',
+      });
+
+      await navigatePage(args).handler(
+        {params: {url: 'https://example.com/start'}, page},
+        response,
+        context,
+      );
+
+      sinon.assert.calledOnce(context.rebindPageByTargetId);
+      assert.match(
+        response.appendResponseLine
+          .getCalls()
+          .map(c => c.args[0])
+          .join('\n'),
+        /Self-healed: re-bound target mock-target-id to latest active frame \(frameId=new-frame-9, url=https:\/\/example\.com\/final\)/,
+      );
     });
   });
 });

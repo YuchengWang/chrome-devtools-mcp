@@ -701,6 +701,17 @@ export class CuaProxyClient {
                 (await this.#launchChromeAndWait(options.channel, signal));
               continue;
             }
+            if (
+              err.code === 'browser_consent_required' ||
+              err.message.includes('browser_consent_required')
+            ) {
+              this.#rotateSession();
+              throw new CuaToolRefusalError(
+                `Existing-profile authorization is required or expired for Chrome (pid=${win.pid}, window_id=${win.windowId}; 30m idle / 8h absolute TTL): ${err.message}. ` +
+                  `Approve the "Allow remote debugging?" dialog via cua-ycwang:approve_browser_consent(pid=${win.pid}, window_id=${win.windowId}, wait_ms=15000) and retry.`,
+                'browser_consent_required',
+              );
+            }
           }
           throw err;
         }

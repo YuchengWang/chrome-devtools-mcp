@@ -19,6 +19,7 @@ import {
   fill,
   drag,
   fillForm,
+  handleFileChooser,
   uploadFile,
   pressKey,
   clickAt,
@@ -2162,6 +2163,77 @@ describe('input', () => {
           'uControl',
         ]);
       });
+    });
+  });
+
+  describe('handle_file_chooser', () => {
+    it('delegates accept/cancel/list actions to page.handleFileChooser', async () => {
+      const {page, response, context, args} = createHandlerMocks();
+      page.handleFileChooser.resolves({
+        action: 'accept',
+        handled: {
+          id: 3,
+          frameId: 'main',
+          mode: 'selectSingle',
+          createdAt: 100,
+        },
+        pending: [],
+      });
+
+      await handleFileChooser(args).handler(
+        {
+          params: {
+            action: 'accept',
+            index: 0,
+            filePaths: ['/tmp/upload.txt'],
+            includeSnapshot: true,
+          },
+          page,
+        },
+        response,
+        context,
+      );
+
+      sinon.assert.calledOnceWithExactly(page.handleFileChooser, {
+        action: 'accept',
+        index: 0,
+        filePaths: ['/tmp/upload.txt'],
+      });
+      sinon.assert.calledOnce(response.includeSnapshot);
+      assert.match(
+        response.appendResponseLine
+          .getCalls()
+          .map(c => c.args[0])
+          .join('\n'),
+        /File chooser #3 \(selectSingle, frameId=main\) accepted\./,
+      );
+
+      page.handleFileChooser.resolves({
+        action: 'enable',
+        interceptionEnabled: true,
+        pending: [],
+      });
+      const {response: enableResp} = createHandlerMocks();
+      await handleFileChooser(args).handler(
+        {
+          params: {action: 'enable'},
+          page,
+        },
+        enableResp,
+        context,
+      );
+      sinon.assert.calledWithExactly(page.handleFileChooser, {
+        action: 'enable',
+        index: undefined,
+        filePaths: undefined,
+      });
+      assert.match(
+        enableResp.appendResponseLine
+          .getCalls()
+          .map(c => c.args[0])
+          .join('\n'),
+        /File chooser interception enabled\./,
+      );
     });
   });
 });

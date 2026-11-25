@@ -636,10 +636,12 @@ export const uploadFile: PageToolFactory = definePageTool(() => ({
       // Page.waitForFileChooser() and upload the file this way.
       let fileChooser;
       try {
-        [fileChooser] = await Promise.all([
-          request.page.pptrPage.waitForFileChooser({timeout: 3000}),
-          handle.asLocator().click(),
-        ]);
+        [fileChooser] = await request.page.withNativeFileChooser(async () => {
+          return await Promise.all([
+            request.page.pptrPage.waitForFileChooser({timeout: 3000}),
+            handle.asLocator().click(),
+          ]);
+        });
       } catch {
         throw new Error(
           `Failed to upload file. The element could not accept the file directly, and clicking it did not trigger a file chooser.`,
@@ -651,6 +653,76 @@ export const uploadFile: PageToolFactory = definePageTool(() => ({
       response.includeSnapshot();
     }
     response.appendResponseLine(`File uploaded from ${filePaths.join(', ')}.`);
+  },
+}));
+
+export const handleFileChooser: PageToolFactory = definePageTool(() => ({
+  name: 'handle_file_chooser',
+  description:
+    'Enable/disable Page.fileChooserOpened interception, list queued choosers, or accept (with filePaths) / cancel an intercepted chooser without blocking the browser.',
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    action: zod
+      .enum(['accept', 'cancel', 'list', 'enable', 'disable'])
+      .describe(
+        'Action: enable or disable file chooser interception, list queued choosers (auto-enables interception if unset), accept a pending chooser with filePaths, or cancel it.',
+      ),
+    index: zod
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        'Zero-based index in the pending file chooser queue (default: 0).',
+      ),
+    filePaths: zod
+      .array(zod.string())
+      .min(1)
+      .optional()
+      .describe(
+        'One or more local file paths when action="accept". Paths must be local to the browser instance.',
+      ),
+    includeSnapshot: includeSnapshotSchema,
+  },
+  blockedByDialog: true,
+  concurrency: 'page',
+  verifyFilesSchema: {
+    filePaths: {
+      local: true,
+      remote: false,
+    },
+  },
+  handler: async (request, response) => {
+    const result = await request.page.handleFileChooser({
+      action: request.params.action,
+      index: request.params.index,
+      filePaths: request.params.filePaths,
+    });
+    if (result.handled) {
+      response.appendResponseLine(
+        `File chooser #${result.handled.id} (${result.handled.mode}, frameId=${result.handled.frameId}) ` +
+          `${result.action === 'accept' ? 'accepted' : 'canceled'}.`,
+      );
+    } else if (result.action === 'enable' || result.action === 'disable') {
+      response.appendResponseLine(
+        `File chooser interception ${result.interceptionEnabled ? 'enabled' : 'disabled'}.`,
+      );
+    }
+    response.appendResponseLine(
+      `Pending file choosers: ${result.pending.length}`,
+    );
+    for (let i = 0; i < result.pending.length; i++) {
+      const chooser = result.pending[i];
+      response.appendResponseLine(
+        `- slot ${i} (#${chooser.id}): mode=${chooser.mode}, frameId=${chooser.frameId}`,
+      );
+    }
+    if (request.params.includeSnapshot) {
+      response.includeSnapshot();
+    }
   },
 }));
 

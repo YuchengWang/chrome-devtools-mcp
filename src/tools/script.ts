@@ -9,6 +9,10 @@ import {pathToFileURL} from 'node:url';
 import type {ParsedArguments} from '../config/mcp-options.js';
 import {zod} from '../third_party/index.js';
 import type {Frame, JSHandle, Page, WebWorker} from '../third_party/browser.js';
+import {
+  getErrorMessage,
+  isDetachedNavigationError,
+} from '../utils/errorHandling.js';
 
 import {ToolCategory} from './categories.js';
 import {
@@ -194,23 +198,51 @@ Example with arguments: \`(el) => el.innerText\`
 
         // ToolHandler hands over the page of page-scoped tools only.
         response.includeConsoleErrorsFrom(mcpPage);
-        const result = await mcpPage.waitForEventsAfterAction(
-          async () => {
-            await performEvaluation(
-              evaluatable,
-              source,
-              format,
-              args,
-              response,
-              {
-                filePath,
-                context,
-              },
+        try {
+          const result = await mcpPage.waitForEventsAfterAction(
+            async () => {
+              await performEvaluation(
+                evaluatable,
+                source,
+                format,
+                args,
+                response,
+                {
+                  filePath,
+                  context,
+                },
+              );
+            },
+            {handleDialog: dialogAction ?? 'accept', waitForStableDom},
+          );
+          response.attachWaitForResult(result);
+        } catch (error) {
+          if (
+            mcpPage.pptrPage.browser()?.connected !== false &&
+            isDetachedNavigationError(error)
+          ) {
+            const targetId = mcpPage.targetId;
+            const recovery = await context
+              .rebindPageByTargetId(targetId, {previousPage: mcpPage})
+              .catch(() => undefined);
+            const detail = getErrorMessage(error);
+            if (recovery?.recovered) {
+              throw new Error(
+                `Navigation detached during evaluate_script (${detail}). ` +
+                  `Self-healed target ${targetId} to active frame ` +
+                  `(frameId=${recovery.frameId ?? 'unknown'}, url=${recovery.url ?? 'unknown'}) ` +
+                  'and invalidated stale snapshots; retry evaluate_script or call take_snapshot.',
+                {cause: error},
+              );
+            }
+            throw new Error(
+              `Navigation detached during evaluate_script (${detail}) on target ${targetId}; ` +
+                're-take a snapshot or check list_pages.',
+              {cause: error},
             );
-          },
-          {handleDialog: dialogAction ?? 'accept', waitForStableDom},
-        );
-        response.attachWaitForResult(result);
+          }
+          throw error;
+        }
       },
     };
   },

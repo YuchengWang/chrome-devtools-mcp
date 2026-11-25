@@ -14,8 +14,41 @@ import type {
   HeapEdgesQueryOptions,
   HeapQueryOptions,
 } from '../processors/HeapSnapshotManager.js';
+import type {
+  NetworkAlertCategory,
+  NetworkAlertData,
+  NetworkAlertKind,
+  SseEventData,
+  WaitForNetworkResponseOptions,
+  WaitForNetworkResponseResult,
+  WebSocketConnectionInfo,
+  WebSocketStatus,
+  WsFrameData,
+} from '../collectors/RealtimeNetworkCollector.js';
 import type {UncaughtError} from '../collectors/PageCollector.js';
-import type {McpPage} from '../McpPage.js';
+import type {NetworkMonitorsManager} from '../config/NetworkMonitorsConfig.js';
+import type {
+  DownloadEntry,
+  DownloadState,
+  RebindPageResult,
+  WaitForDownloadOptions,
+} from '../McpContext.js';
+import type {
+  AuthChallengeInfo,
+  DetachedFrameRecoveryResult,
+  DialogQueueEntry,
+  HandleAuthChallengeOptions,
+  HandleAuthChallengeResult,
+  HandleFileChooserOptions,
+  HandleFileChooserResult,
+  McpPage,
+  PendingFileChooserInfo,
+  WaitForDialogOptions,
+  WaitForDialogResult,
+  WaitForDomOptions,
+  WaitForDomResult,
+} from '../McpPage.js';
+import type {RingBufferQueryResult} from '../utils/RingBuffer.js';
 import type {Logpoint, LogpointOptions} from '../utils/logpoint.js';
 import type {DevToolsCommentBridge} from '../devtools/DevToolsCommentBridge.js';
 import type {CssFormatterOptions} from '../formatters/CssFormatter.js';
@@ -419,6 +452,18 @@ export type Context = Readonly<{
   getSelectedMcpPage(): McpPage;
   getWorkers(): McpWorker[];
   getWorkerById(id: string): McpWorker | undefined;
+  getDownloadDirectory(): string | undefined;
+  enableDownloads(): Promise<void>;
+  getDownloads(options?: {
+    state?: DownloadState;
+    limit?: number;
+  }): DownloadEntry[];
+  waitForDownload(options?: WaitForDownloadOptions): Promise<DownloadEntry>;
+  getNetworkMonitorsManager(): NetworkMonitorsManager;
+  rebindPageByTargetId(
+    targetId: string,
+    options?: {previousPage?: ContextPage},
+  ): Promise<RebindPageResult>;
 }>;
 
 /**
@@ -537,6 +582,7 @@ export interface WebAuthnAuthenticatorState {
  */
 export type ContextPage = Readonly<{
   readonly id: number;
+  readonly targetId: string;
   readonly pptrPage: Page;
   readonly cpuThrottlingRate: number;
   readonly networkConditions: string | null;
@@ -559,8 +605,54 @@ export type ContextPage = Readonly<{
   ): Promise<{backendNodeId: number; targetId?: string} | undefined>;
 
   getDialog(): Dialog | undefined;
-  clearDialog(): void;
+  getDialogs(): DialogQueueEntry[];
+  clearDialog(dialog?: Dialog): void;
+  waitForDialog(options?: WaitForDialogOptions): Promise<WaitForDialogResult>;
   throwIfDialogOpen(): void;
+  withNativeFileChooser<T>(fn: () => Promise<T>): Promise<T>;
+  getPendingFileChoosers(): PendingFileChooserInfo[];
+  handleFileChooser(
+    options: HandleFileChooserOptions,
+  ): Promise<HandleFileChooserResult>;
+  getPendingAuthChallenges(): AuthChallengeInfo[];
+  getAuthChallengeHistory(limit?: number): AuthChallengeInfo[];
+  handleAuthChallenge(
+    options: HandleAuthChallengeOptions,
+  ): Promise<HandleAuthChallengeResult>;
+  listWebSocketConnections(options?: {
+    status?: WebSocketStatus;
+    urlPattern?: string;
+  }): WebSocketConnectionInfo[];
+  pollWsFrames(options?: {
+    requestId?: string;
+    urlPattern?: string;
+    direction?: 'sent' | 'received' | 'error' | 'all';
+    sinceSeq?: number;
+    unreadOnly?: boolean;
+    limit?: number;
+  }): RingBufferQueryResult<WsFrameData>;
+  pollSseEvents(options?: {
+    requestId?: string;
+    urlPattern?: string;
+    eventName?: string;
+    sinceSeq?: number;
+    unreadOnly?: boolean;
+    limit?: number;
+  }): RingBufferQueryResult<SseEventData>;
+  pollNetworkAlerts(options?: {
+    kinds?: NetworkAlertKind[];
+    categories?: NetworkAlertCategory[];
+    urlPattern?: string;
+    includeCanceled?: boolean;
+    sinceSeq?: number;
+    unreadOnly?: boolean;
+    limit?: number;
+  }): RingBufferQueryResult<NetworkAlertData>;
+  waitForNetworkResponse(
+    options: WaitForNetworkResponseOptions,
+  ): Promise<WaitForNetworkResponseResult>;
+  waitForDom(options: WaitForDomOptions): Promise<WaitForDomResult>;
+  recoverDetachedFrame(error?: unknown): Promise<DetachedFrameRecoveryResult>;
   setLogpoints(logpoints: LogpointOptions[]): Promise<Logpoint[]>;
   isClosed(): boolean;
   getScreenRecorder(): ScreenRecorderData | null;

@@ -7,12 +7,18 @@
 import type {ParsedArguments} from '../config/mcp-options.js';
 import {zod} from '../third_party/index.js';
 import type {CdpPage} from '../third_party/browser.js';
+import {
+  compileRegex,
+  getErrorMessage,
+  isDetachedNavigationError,
+} from '../utils/errorHandling.js';
 import {logger} from '../utils/logger.js';
 import {validateUrl} from '../utils/url.js';
 
 import {ToolCategory} from './categories.js';
 import {
   CLOSE_PAGE_ERROR,
+  type Context,
   type ContextPage,
   definePageTool,
   defineTool,
@@ -35,6 +41,44 @@ function disconnectedNavigationError(
       'The underlying Chrome or local CDP proxy connection closed; re-run browser_prepare (if using cua-ycwang) and connect_browser to re-attach.',
     {cause},
   );
+}
+
+async function tryRecoverDetachedNavigation(
+  actionDescription: string,
+  error: unknown,
+  page: ContextPage,
+  context: Context,
+): Promise<{recovered: boolean; targetId: string; error: Error}> {
+  const detail = getErrorMessage(error);
+  const targetId = page.targetId;
+  const recovery = await context
+    .rebindPageByTargetId(targetId, {previousPage: page})
+    .catch(() => undefined);
+  if (recovery?.recovered) {
+    return {
+      recovered: true,
+      targetId,
+      error: new Error(
+        `Navigation detached during ${actionDescription} (${detail}). ` +
+          `Self-healed target ${targetId} to latest active frame ` +
+          `(frameId=${recovery.frameId ?? 'unknown'}, url=${recovery.url ?? 'unknown'}) ` +
+          'and invalidated stale snapshots; retry or call take_snapshot.',
+        {cause: error},
+      ),
+    };
+  }
+  const fallbackNote = recovery?.fallbackPage
+    ? ` Selected fallback page ${recovery.fallbackPage.id} (${recovery.fallbackPage.url()}).`
+    : ' Call list_pages to see open pages.';
+  return {
+    recovered: false,
+    targetId,
+    error: new Error(
+      `Navigation detached during ${actionDescription} (${detail}) on target ${targetId}; ` +
+        `could not rebind the detached frame.${fallbackNote}`,
+      {cause: error},
+    ),
+  };
 }
 
 export const listPages: ToolFactory = defineTool((args: ParsedArguments) => {
@@ -191,6 +235,18 @@ export const newPage: ToolFactory = defineTool((args: ParsedArguments) => {
         if (isBrowserDisconnected(page)) {
           throw disconnectedNavigationError('new_page', error);
         }
+        if (isDetachedNavigationError(error)) {
+          const recovered = await tryRecoverDetachedNavigation(
+            'new_page',
+            error,
+            page,
+            context,
+          );
+          if (recovered.recovered) {
+            response.setIncludePages(true);
+            throw recovered.error;
+          }
+        }
         // A dialog-blocked load stays open for handle_dialog. Otherwise cleanup is
         // best-effort: the navigation error is always what gets rethrown.
         if (page.getDialog()) {
@@ -261,7 +317,7 @@ export const navigatePage: PageToolFactory = definePageTool(
       blockedByDialog: false,
       concurrency: 'page',
       verifyFilesSchema: {},
-      handler: async (request, response) => {
+      handler: async (request, response, context) => {
         const page = request.page;
         const options = {
           timeout: request.params.timeout,
@@ -303,8 +359,24 @@ export const navigatePage: PageToolFactory = definePageTool(
             if (isBrowserDisconnected(page)) {
               throw error;
             }
-            const detail =
-              error instanceof Error ? error.message : String(error);
+            const detail = getErrorMessage(error);
+            if (isDetachedNavigationError(error)) {
+              const recovery = await context
+                .rebindPageByTargetId(page.targetId, {previousPage: page})
+                .catch(() => undefined);
+              if (recovery?.recovered) {
+                response.appendResponseLine(
+                  `${failurePrefix}: ${detail}. Self-healed: re-bound target ${recovery.targetId} ` +
+                    `to latest active frame (frameId=${recovery.frameId ?? 'unknown'}, url=${recovery.url ?? 'unknown'}) ` +
+                    'and invalidated stale snapshots; retry or call take_snapshot.',
+                );
+              } else {
+                response.appendResponseLine(
+                  `${failurePrefix}: ${detail}. Detached frame could not be rebound on target ${page.targetId}; call list_pages.`,
+                );
+              }
+              return;
+            }
             response.appendResponseLine(`${failurePrefix}: ${detail}.`);
           }
         };
@@ -372,6 +444,16 @@ export const navigatePage: PageToolFactory = definePageTool(
           if (isBrowserDisconnected(page)) {
             throw disconnectedNavigationError('navigate_page', error);
           }
+          if (isDetachedNavigationError(error)) {
+            const recovered = await tryRecoverDetachedNavigation(
+              'navigate_page',
+              error,
+              page,
+              context,
+            );
+            response.setIncludePages(true);
+            throw recovered.error;
+          }
           throw error;
         } finally {
           if (initScriptId && !isBrowserDisconnected(page)) {
@@ -436,7 +518,7 @@ export const resizePage: PageToolFactory = definePageTool(() => ({
 
 export const handleDialog: PageToolFactory = definePageTool(() => ({
   name: 'handle_dialog',
-  description: `If a browser dialog was opened, use this command to handle it`,
+  description: `If one or more browser dialogs are open in the queue, use this command to handle them.`,
   annotations: {
     category: ToolCategory.INPUT,
     readOnlyHint: false,
@@ -449,41 +531,218 @@ export const handleDialog: PageToolFactory = definePageTool(() => ({
       .string()
       .optional()
       .describe('Optional prompt text to enter into the dialog.'),
+    slotIndex: zod
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        'Zero-based queue slot index to handle when multiple dialogs are queued (default: 0).',
+      ),
+    all: zod
+      .boolean()
+      .optional()
+      .describe('Handle all currently queued dialogs in FIFO order.'),
   },
   blockedByDialog: false,
   concurrency: 'page',
   verifyFilesSchema: {},
   handler: async (request, response) => {
     const page = request.page;
-    const dialog = page.getDialog();
-    if (!dialog) {
-      throw new Error('No open dialog found');
+    const {action, promptText, slotIndex, all} = request.params;
+
+    if (!all && slotIndex === undefined) {
+      const dialog = page.getDialog();
+      if (!dialog) {
+        throw new Error('No open dialog found');
+      }
+
+      switch (action) {
+        case 'accept': {
+          try {
+            await dialog.accept(promptText);
+          } catch (err) {
+            // Likely already handled by the user outside of MCP.
+            logger?.(err);
+          }
+          response.appendResponseLine('Successfully accepted the dialog');
+          break;
+        }
+        case 'dismiss': {
+          try {
+            await dialog.dismiss();
+          } catch (err) {
+            // Likely already handled.
+            logger?.(err);
+          }
+          response.appendResponseLine('Successfully dismissed the dialog');
+          break;
+        }
+      }
+
+      page.clearDialog();
+      response.setIncludePages(true);
+      return;
     }
 
-    switch (request.params.action) {
-      case 'accept': {
+    const dialogs = page.getDialogs();
+    if (all) {
+      if (dialogs.length === 0) {
+        const single = page.getDialog();
+        if (!single) {
+          throw new Error('No open dialog found');
+        }
         try {
-          await dialog.accept(request.params.promptText);
+          if (action === 'accept') {
+            await single.accept(promptText);
+          } else {
+            await single.dismiss();
+          }
         } catch (err) {
-          // Likely already handled by the user outside of MCP.
           logger?.(err);
         }
-        response.appendResponseLine('Successfully accepted the dialog');
-        break;
+        page.clearDialog(single);
+        response.appendResponseLine(
+          `Successfully ${action === 'accept' ? 'accepted' : 'dismissed'} 1 dialog`,
+        );
+        response.setIncludePages(true);
+        return;
       }
-      case 'dismiss': {
+      let handledCount = 0;
+      for (const entry of dialogs) {
         try {
-          await dialog.dismiss();
+          if (action === 'accept') {
+            await entry.dialog.accept(promptText);
+          } else {
+            await entry.dialog.dismiss();
+          }
         } catch (err) {
-          // Likely already handled.
           logger?.(err);
         }
-        response.appendResponseLine('Successfully dismissed the dialog');
-        break;
+        page.clearDialog(entry.dialog);
+        handledCount++;
+      }
+      response.appendResponseLine(
+        `Successfully ${action === 'accept' ? 'accepted' : 'dismissed'} ${handledCount} queued dialog(s)`,
+      );
+      response.setIncludePages(true);
+      return;
+    }
+
+    const targetIndex = slotIndex ?? 0;
+    const targetEntry = dialogs[targetIndex];
+    if (!targetEntry) {
+      throw new Error(
+        `No queued dialog at slotIndex=${targetIndex} (queueLength=${dialogs.length}).`,
+      );
+    }
+    try {
+      if (action === 'accept') {
+        await targetEntry.dialog.accept(promptText);
+      } else {
+        await targetEntry.dialog.dismiss();
+      }
+    } catch (err) {
+      logger?.(err);
+    }
+    page.clearDialog(targetEntry.dialog);
+    response.appendResponseLine(
+      `Successfully ${action === 'accept' ? 'accepted' : 'dismissed'} queued dialog slot ${targetIndex} (#${targetEntry.id})`,
+    );
+    response.setIncludePages(true);
+  },
+}));
+
+export const waitForDialog: PageToolFactory = definePageTool(() => ({
+  name: 'wait_for_dialog',
+  description:
+    'Wait for a browser dialog (alert/confirm/prompt/beforeunload) or resolve immediately with a queued dialog, optionally accepting or dismissing it.',
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    type: zod
+      .enum(['alert', 'confirm', 'prompt', 'beforeunload'])
+      .optional()
+      .describe('Filter by expected dialog type.'),
+    messageRegex: zod
+      .string()
+      .superRefine((value, ctx) => {
+        try {
+          compileRegex(value);
+        } catch (error) {
+          ctx.addIssue({
+            code: 'custom',
+            message: getErrorMessage(error),
+          });
+        }
+      })
+      .optional()
+      .describe('Optional regex matched against the dialog message.'),
+    timeoutMs: zod
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Timeout in milliseconds (default: 10000).'),
+    action: zod
+      .enum(['accept', 'dismiss'])
+      .optional()
+      .describe(
+        'Optional action to run immediately on the matched dialog if it was queued rather than auto-handled.',
+      ),
+    promptText: zod
+      .string()
+      .optional()
+      .describe('Prompt input text when action="accept" on a prompt dialog.'),
+  },
+  blockedByDialog: false,
+  concurrency: 'page',
+  verifyFilesSchema: {},
+  handler: async (request, response) => {
+    const page = request.page;
+    const result = await page.waitForDialog({
+      type: request.params.type,
+      messageRegex: request.params.messageRegex
+        ? compileRegex(request.params.messageRegex)
+        : undefined,
+      timeoutMs: request.params.timeoutMs,
+    });
+
+    if (result.autoHandled) {
+      response.appendResponseLine(
+        `Dialog #${result.id} (${result.type}: "${result.message}") was auto-handled by policy (${result.autoAction}).`,
+      );
+      response.setIncludePages(true);
+      return;
+    }
+
+    if (request.params.action) {
+      const entry = page.getDialogs().find(d => d.id === result.id);
+      const dialog = entry?.dialog ?? page.getDialog();
+      if (dialog) {
+        try {
+          if (request.params.action === 'accept') {
+            await dialog.accept(request.params.promptText);
+          } else {
+            await dialog.dismiss();
+          }
+        } catch (err) {
+          logger?.(err);
+        }
+        page.clearDialog(dialog);
+        response.appendResponseLine(
+          `Waited for and ${request.params.action === 'accept' ? 'accepted' : 'dismissed'} ${result.type} dialog (#${result.id}): "${result.message}".`,
+        );
+        response.setIncludePages(true);
+        return;
       }
     }
 
-    page.clearDialog();
+    response.appendResponseLine(
+      `Dialog #${result.id} (${result.type}): "${result.message}" (queueLength=${result.queueLength}).`,
+    );
     response.setIncludePages(true);
   },
 }));

@@ -10,6 +10,7 @@ import {describe, it} from 'node:test';
 import sinon from 'sinon';
 
 import {UncaughtError} from '../src/collectors/PageCollector.js';
+import {NetworkMonitorsManager} from '../src/config/NetworkMonitorsConfig.js';
 import type {ReadonlyServerConfig} from '../src/config/ServerConfig.js';
 import type {TargetUniverse} from '../src/devtools/DevtoolsUtils.js';
 import {LogpointManager} from '../src/LogpointManager.js';
@@ -2886,5 +2887,428 @@ describe('McpPage logpoints', () => {
     mcpPage.dispose();
 
     sinon.assert.calledOnce(dispose);
+  });
+
+  describe('Phase 1 CDP queue, interception, waitForDom, and recovery', () => {
+    it('queues multiple dialogs FIFO and honors auto_dialog_policy', async () => {
+      const pptrPage = createMockPuppeteerPage();
+      pptrPage.emulateFocusedPage.resolves();
+      const target = createMockPuppeteerTarget({page: pptrPage});
+      const mcpPage = new McpPage(target, 1, {
+        config: createMockServerConfig(),
+        locatorClass: Locator,
+      });
+      await mcpPage.init();
+
+      const d1 = createMockDialog({type: 'alert', message: 'First'});
+      const d2 = createMockDialog({type: 'confirm', message: 'Second'});
+      pptrPage.emit('dialog', d1);
+      pptrPage.emit('dialog', d2);
+
+      assert.strictEqual(mcpPage.getDialogs().length, 2);
+      assert.strictEqual(mcpPage.getDialog(), d1);
+      mcpPage.clearDialog(d1);
+      assert.strictEqual(mcpPage.getDialog(), d2);
+
+      // Test waitForDialog matching existing queued dialog vs future dialog.
+      const immediate = await mcpPage.waitForDialog({type: 'confirm'});
+      assert.strictEqual(immediate.message, 'Second');
+      assert.strictEqual(immediate.autoHandled, false);
+
+      const futurePromise = mcpPage.waitForDialog({
+        type: 'prompt',
+        messageRegex: /Enter/,
+      });
+      const d3 = createMockDialog({type: 'prompt', message: 'Enter code'});
+      pptrPage.emit('dialog', d3);
+      const future = await futurePromise;
+      assert.strictEqual(future.message, 'Enter code');
+
+      // Test auto_dialog_policy auto-accepting when loaded.
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const {createTempDir} = await import('./utils.js');
+      using dir = createTempDir('cd4a-dialog-policy-');
+      const cfgPath = path.join(dir.path, 'monitors.json');
+      fs.writeFileSync(
+        cfgPath,
+        JSON.stringify({
+          auto_dialog_policy: {
+            default: 'queue',
+            alert: 'accept',
+          },
+        }),
+      );
+      using manager = new NetworkMonitorsManager({
+        configPath: cfgPath,
+        cwd: dir.path,
+        tmpDir: dir.path,
+        skipDiscovery: false,
+      });
+      manager.start();
+
+      const pptr2 = createMockPuppeteerPage();
+      pptr2.emulateFocusedPage.resolves();
+      const mcp2 = new McpPage(createMockPuppeteerTarget({page: pptr2}), 2, {
+        config: createMockServerConfig(),
+        locatorClass: Locator,
+        monitorsManager: manager,
+      });
+      await mcp2.init();
+      const autoAlert = createMockDialog({type: 'alert', message: 'Notice'});
+      const waitAuto = mcp2.waitForDialog({type: 'alert'});
+      pptr2.emit('dialog', autoAlert);
+      const resAuto = await waitAuto;
+      assert.strictEqual(resAuto.autoHandled, true);
+      assert.strictEqual(resAuto.autoAction, 'accept');
+      sinon.assert.calledOnce(autoAlert.accept);
+      assert.strictEqual(mcp2.getDialogs().length, 0);
+      mcpPage.dispose();
+      mcp2.dispose();
+    });
+
+    it('does not intercept file choosers by default, enables on demand via handle_file_chooser/config, and keeps upload_file working', async () => {
+      const pptrPage = createMockPuppeteerPage();
+      pptrPage.emulateFocusedPage.resolves();
+      const target = createMockPuppeteerTarget({page: pptrPage});
+      const mcpPage = new McpPage(target, 1, {
+        config: createMockServerConfig(),
+        locatorClass: Locator,
+      });
+      await mcpPage.init();
+
+      // Default daily mode must NOT call Page.setInterceptFileChooserDialog(true).
+      assert.strictEqual(
+        pptrPage.cdpSession.send
+          .getCalls()
+          .some(call => call.args[0] === 'Page.setInterceptFileChooserDialog'),
+        false,
+      );
+
+      // Native upload_file wrapper also leaves global interception disabled in daily mode.
+      await mcpPage.withNativeFileChooser(async () => 'native-ok');
+      assert.strictEqual(
+        pptrPage.cdpSession.send
+          .getCalls()
+          .some(
+            call =>
+              call.args[0] === 'Page.setInterceptFileChooserDialog' &&
+              (call.args[1] as {enabled?: boolean})?.enabled === true,
+          ),
+        false,
+      );
+
+      // Explicitly enabling via handle_file_chooser activates global interception.
+      const enabledRes = await mcpPage.handleFileChooser({action: 'enable'});
+      assert.strictEqual(enabledRes.interceptionEnabled, true);
+      sinon.assert.calledWith(
+        pptrPage.cdpSession.send,
+        'Page.setInterceptFileChooserDialog',
+        {enabled: true},
+      );
+
+      pptrPage.cdpSession.emit('Page.fileChooserOpened', {
+        frameId: 'main-frame',
+        mode: 'selectSingle',
+        backendNodeId: 77,
+      });
+      assert.strictEqual(mcpPage.getPendingFileChoosers().length, 1);
+
+      const accepted = await mcpPage.handleFileChooser({
+        action: 'accept',
+        filePaths: ['/tmp/doc.pdf'],
+      });
+      assert.strictEqual(accepted.handled?.backendNodeId, 77);
+      assert.strictEqual(accepted.pending.length, 0);
+      sinon.assert.calledWith(
+        pptrPage.cdpSession.send,
+        'DOM.setFileInputFiles',
+        {
+          files: ['/tmp/doc.pdf'],
+          backendNodeId: 77,
+        },
+      );
+
+      // Re-enables global interception after native waitForFileChooser wrapper exits when enabled.
+      pptrPage.cdpSession.send.resetHistory();
+      await mcpPage.withNativeFileChooser(async () => {
+        pptrPage.cdpSession.emit('Page.fileChooserOpened', {
+          frameId: 'main-frame',
+          mode: 'selectSingle',
+          backendNodeId: 78,
+        });
+        return 'ok';
+      });
+      assert.strictEqual(mcpPage.getPendingFileChoosers().length, 0);
+      sinon.assert.calledWith(
+        pptrPage.cdpSession.send,
+        'Page.setInterceptFileChooserDialog',
+        {enabled: true},
+      );
+
+      // Disabling turns interception back off.
+      const disabledRes = await mcpPage.handleFileChooser({action: 'disable'});
+      assert.strictEqual(disabledRes.interceptionEnabled, false);
+      sinon.assert.calledWith(
+        pptrPage.cdpSession.send,
+        'Page.setInterceptFileChooserDialog',
+        {enabled: false},
+      );
+      mcpPage.dispose();
+    });
+
+    it('enables Fetch.enable on demand (policy or hot-reloaded auto_auth_policy), defaults unmatched auth to Default, and evicts oldest retry guard ID', async () => {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const {createTempDir} = await import('./utils.js');
+      using dir = createTempDir('cd4a-auth-policy-');
+      const cfgPath = path.join(dir.path, 'monitors.json');
+      fs.writeFileSync(cfgPath, JSON.stringify({monitors: []}), 'utf8');
+      using manager = new NetworkMonitorsManager({
+        configPath: cfgPath,
+        cwd: dir.path,
+        tmpDir: dir.path,
+        debounceMs: 25,
+        skipDiscovery: false,
+      });
+      manager.start();
+
+      const pptrPage = createMockPuppeteerPage();
+      pptrPage.emulateFocusedPage.resolves();
+      const authSession = createMockCDPSession();
+      pptrPage.createCDPSession.onFirstCall().resolves(createMockCDPSession());
+      pptrPage.createCDPSession.onSecondCall().resolves(authSession);
+
+      const mcpPage = new McpPage(
+        createMockPuppeteerTarget({page: pptrPage}),
+        1,
+        {
+          config: createMockServerConfig(),
+          locatorClass: Locator,
+          monitorsManager: manager,
+        },
+      );
+      await mcpPage.init();
+
+      const authSend = authSession.send as unknown as sinon.SinonStub;
+      // No auto_auth_policy and no runtime rules -> Fetch.enable must NOT be called during init.
+      assert.strictEqual(
+        authSend.getCalls().some(call => call.args[0] === 'Fetch.enable'),
+        false,
+      );
+
+      // Hot-reloading auto_auth_policy enables Fetch.enable dynamically.
+      fs.writeFileSync(
+        cfgPath,
+        JSON.stringify({auto_auth_policy: {rules: []}}),
+        'utf8',
+      );
+      const enableDeadline = Date.now() + 3000;
+      while (
+        Date.now() < enableDeadline &&
+        !authSend.getCalls().some(call => call.args[0] === 'Fetch.enable')
+      ) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      const fetchEnableCall = authSend
+        .getCalls()
+        .find(call => call.args[0] === 'Fetch.enable');
+      assert.ok(fetchEnableCall);
+      assert.deepStrictEqual(fetchEnableCall.args[1], {
+        handleAuthRequests: true,
+        patterns: [{urlPattern: 'http://*'}, {urlPattern: 'https://*'}],
+      });
+
+      // Unmatched auth challenge defaults to 'Default' (Chrome native) instead of 'CancelAuth'.
+      authSession.emit('Fetch.authRequired', {
+        requestId: 'auth-default-1',
+        frameId: 'f1',
+        resourceType: 'Document',
+        request: {url: 'https://corp.example.com/ntlm', method: 'GET'},
+        authChallenge: {
+          source: 'Server',
+          origin: 'https://corp.example.com',
+          scheme: 'NTLM',
+          realm: 'Corp',
+        },
+      });
+      const defaultCall = authSend
+        .getCalls()
+        .find(call => call.args[0] === 'Fetch.continueWithAuth');
+      assert.ok(defaultCall);
+      assert.deepStrictEqual(defaultCall.args[1], {
+        requestId: 'auth-default-1',
+        authChallengeResponse: {response: 'Default'},
+      });
+
+      // Removing auto_auth_policy on hot-reload disables Fetch when no runtime policy exists.
+      authSend.resetHistory();
+      fs.writeFileSync(cfgPath, JSON.stringify({monitors: []}), 'utf8');
+      const disableDeadline = Date.now() + 3000;
+      while (
+        Date.now() < disableDeadline &&
+        !authSend.getCalls().some(call => call.args[0] === 'Fetch.disable')
+      ) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      assert.ok(
+        authSend.getCalls().some(call => call.args[0] === 'Fetch.disable'),
+      );
+
+      // Set runtime policy to queue -> Fetch.enable turns on again, and we can respond via handleAuthChallenge.
+      authSend.resetHistory();
+      await mcpPage.handleAuthChallenge({
+        action: 'set_policy',
+        defaultAction: 'queue',
+      });
+      assert.ok(
+        authSend.getCalls().some(call => call.args[0] === 'Fetch.enable'),
+      );
+
+      authSession.emit('Fetch.authRequired', {
+        requestId: 'auth-req-1',
+        frameId: 'f1',
+        resourceType: 'Document',
+        request: {url: 'https://vault.example.com/secret', method: 'GET'},
+        authChallenge: {
+          source: 'Server',
+          origin: 'https://vault.example.com',
+          scheme: 'Basic',
+          realm: 'Vault',
+        },
+      });
+
+      assert.strictEqual(mcpPage.getPendingAuthChallenges().length, 1);
+      const provided = await mcpPage.handleAuthChallenge({
+        action: 'provide',
+        username: 'bob',
+        password: 'pw',
+      });
+      assert.strictEqual(provided.resolved?.status, 'provided');
+      const provideCall = authSend
+        .getCalls()
+        .find(call => call.args[0] === 'Fetch.continueWithAuth');
+      assert.ok(provideCall);
+      assert.deepStrictEqual(provideCall.args[1], {
+        requestId: 'auth-req-1',
+        authChallengeResponse: {
+          response: 'ProvideCredentials',
+          username: 'bob',
+          password: 'pw',
+        },
+      });
+
+      // Overflowing MAX_ATTEMPTED_AUTH_IDS (500) evicts only the oldest ID (auth-req-1), keeping recent ones guarded.
+      for (let i = 0; i < 500; i++) {
+        authSession.emit('Fetch.authRequired', {
+          requestId: `auth-fill-${i}`,
+          frameId: 'f1',
+          resourceType: 'Document',
+          request: {url: 'https://vault.example.com/fill', method: 'GET'},
+          authChallenge: {
+            source: 'Server',
+            origin: 'https://vault.example.com',
+            scheme: 'Basic',
+            realm: 'Vault',
+          },
+        });
+        await mcpPage.handleAuthChallenge({
+          action: 'provide',
+          username: 'bob',
+          password: 'pw',
+        });
+      }
+
+      // Recent ID auth-fill-499 is STILL guarded against retry loops -> CancelAuth.
+      authSend.resetHistory();
+      authSession.emit('Fetch.authRequired', {
+        requestId: 'auth-fill-499',
+        frameId: 'f1',
+        resourceType: 'Document',
+        request: {url: 'https://vault.example.com/fill', method: 'GET'},
+        authChallenge: {
+          source: 'Server',
+          origin: 'https://vault.example.com',
+          scheme: 'Basic',
+          realm: 'Vault',
+        },
+      });
+      const loopCancelCall = authSend
+        .getCalls()
+        .find(call => call.args[0] === 'Fetch.continueWithAuth');
+      assert.ok(loopCancelCall);
+      assert.deepStrictEqual(loopCancelCall.args[1], {
+        requestId: 'auth-fill-499',
+        authChallengeResponse: {response: 'CancelAuth'},
+      });
+
+      // Oldest evicted ID auth-req-1 is no longer treated as a retry loop.
+      authSession.emit('Fetch.authRequired', {
+        requestId: 'auth-req-1',
+        frameId: 'f1',
+        resourceType: 'Document',
+        request: {url: 'https://vault.example.com/secret', method: 'GET'},
+        authChallenge: {
+          source: 'Server',
+          origin: 'https://vault.example.com',
+          scheme: 'Basic',
+          realm: 'Vault',
+        },
+      });
+      assert.strictEqual(mcpPage.getPendingAuthChallenges().length, 1);
+      mcpPage.dispose();
+    });
+
+    it('supports waitForDom shadow/iframe evaluation and recovers detached frames', async () => {
+      const pptrPage = createMockPuppeteerPage();
+      pptrPage.emulateFocusedPage.resolves();
+      pptrPage.url.returns('https://example.com/app');
+      const mainFrame = pptrPage.mainFrame();
+      Object.defineProperty(mainFrame, '_id', {
+        value: 'frame-main',
+        configurable: true,
+      });
+      Object.defineProperty(mainFrame, 'detached', {
+        value: false,
+        configurable: true,
+      });
+      pptrPage.frames.returns([mainFrame]);
+
+      const evalStub = mainFrame.evaluate as unknown as sinon.SinonStub;
+      evalStub
+        .onFirstCall()
+        .rejects(new Error('Execution context was destroyed'));
+      evalStub.onSecondCall().resolves({
+        ok: true,
+        count: 1,
+        visibleCount: 1,
+        tagName: 'button',
+        textPreview: 'Save',
+      });
+
+      const target = createMockPuppeteerTarget({page: pptrPage});
+      const mcpPage = new McpPage(target, 1, {
+        config: createMockServerConfig(),
+        locatorClass: Locator,
+      });
+      await mcpPage.init();
+
+      const res = await mcpPage.waitForDom({
+        selector: 'app-shell >>> button.save',
+        state: 'visible',
+        timeoutMs: 2000,
+        pollIntervalMs: 10,
+      });
+
+      assert.strictEqual(res.matched, true);
+      assert.strictEqual(res.frameId, 'frame-main');
+      assert.strictEqual(res.tagName, 'button');
+      sinon.assert.calledTwice(evalStub);
+
+      const rec = await mcpPage.recoverDetachedFrame();
+      assert.strictEqual(rec.recovered, true);
+      assert.strictEqual(rec.frameId, 'frame-main');
+      mcpPage.dispose();
+    });
   });
 });

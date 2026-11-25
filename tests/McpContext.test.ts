@@ -2323,4 +2323,255 @@ describe('McpContext', () => {
       );
     });
   });
+
+  describe('downloads and detached target rebind', () => {
+    it('does not hijack Browser.setDownloadBehavior in daily non-isolated mode, and enables on demand / --isolated with temp dir cleanup', async () => {
+      const {EventEmitter} = await import('../src/third_party/browser.js');
+      const connectionEvents = new EventEmitter<Record<PropertyKey, unknown>>();
+      const mockConnection = {
+        on: sinon.stub().callsFake(connectionEvents.on.bind(connectionEvents)),
+        off: sinon
+          .stub()
+          .callsFake(connectionEvents.off.bind(connectionEvents)),
+        send: sinon.stub().resolves({}),
+      };
+
+      const initialTarget = createMockPuppeteerTarget({
+        page: createMockPuppeteerPage(),
+      });
+      const browser = createMockPuppeteerBrowser();
+      browser.targets.returns([initialTarget]);
+      Object.defineProperty(browser, '_connection', {
+        value: mockConnection,
+        configurable: true,
+      });
+      const defaultCtx = browser.defaultBrowserContext();
+      const isoCtx = {
+        id: 'iso-ctx-1',
+        closed: false,
+      };
+      browser.browserContexts.returns([
+        defaultCtx,
+        isoCtx as unknown as ReturnType<typeof browser.defaultBrowserContext>,
+      ]);
+
+      const taskRunner = new TaskRunner();
+      const context = McpContext.create(sinon.stub(), {
+        config: createMockServerConfig({cuaProxy: true, isolated: false}),
+        heapSnapshotManager: new HeapSnapshotManager(taskRunner),
+        taskRunner,
+        getBrowser: async () => browser,
+      });
+      let downloadDir: string | undefined;
+      try {
+        await context.ensureBrowser();
+
+        // Daily --cuaProxy mode must NOT hijack the user's download directory.
+        sinon.assert.notCalled(mockConnection.send);
+        assert.strictEqual(context.getDownloadDirectory(), undefined);
+
+        // Calling waitForDownload (or list_downloads -> enableDownloads) takes over on demand.
+        const waiterPromise = context.waitForDownload({
+          filenameRegex: /invoice\.pdf$/,
+          timeoutMs: 2000,
+        });
+        // Yield microtasks so enableDownloads() finishes before emitting CDP events.
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        downloadDir = context.getDownloadDirectory();
+        assert.ok(downloadDir);
+        await fs.stat(downloadDir);
+
+        sinon.assert.calledWith(
+          mockConnection.send,
+          'Browser.setDownloadBehavior',
+          sinon.match({
+            behavior: 'allowAndName',
+            downloadPath: downloadDir,
+            eventsEnabled: true,
+          }),
+        );
+        sinon.assert.calledWith(
+          mockConnection.send,
+          'Browser.setDownloadBehavior',
+          sinon.match({
+            behavior: 'allowAndName',
+            downloadPath: downloadDir,
+            browserContextId: 'iso-ctx-1',
+            eventsEnabled: true,
+          }),
+        );
+
+        // Creating a new isolated BrowserContext via newPage mounts download behavior on it too.
+        const newIsoPage = createMockPuppeteerPage();
+        newIsoPage.emulateFocusedPage.resolves();
+        const newIsoTarget = createMockPuppeteerTarget({page: newIsoPage});
+        const newIsoCtx = {
+          id: 'iso-ctx-2',
+          closed: false,
+          newPage: sinon.stub().resolves(newIsoPage),
+        };
+        newIsoTarget.browserContext.returns(
+          newIsoCtx as unknown as ReturnType<
+            typeof browser.defaultBrowserContext
+          >,
+        );
+        browser.createBrowserContext.resolves(
+          newIsoCtx as unknown as ReturnType<
+            typeof browser.defaultBrowserContext
+          >,
+        );
+        browser.targets.returns([initialTarget, newIsoTarget]);
+        await context.newPage(false, 'custom-iso');
+        sinon.assert.calledWith(
+          mockConnection.send,
+          'Browser.setDownloadBehavior',
+          sinon.match({
+            behavior: 'allowAndName',
+            downloadPath: downloadDir,
+            browserContextId: 'iso-ctx-2',
+            eventsEnabled: true,
+          }),
+        );
+
+        // #onDownloadProgress without prior downloadWillBegin also enforces MAX_DOWNLOAD_ENTRIES (100).
+        for (let i = 0; i < 105; i++) {
+          connectionEvents.emit('Browser.downloadProgress', {
+            guid: `progress-only-${i}`,
+            totalBytes: 10,
+            receivedBytes: 10,
+            state: 'completed',
+          });
+        }
+        assert.strictEqual(context.getDownloads().length, 100);
+        assert.strictEqual(
+          context.getDownloads().some(d => d.guid === 'progress-only-0'),
+          false,
+        );
+
+        connectionEvents.emit('Browser.downloadWillBegin', {
+          frameId: 'f1',
+          guid: 'guid-1',
+          url: 'https://example.com/invoice.pdf',
+          suggestedFilename: 'invoice.pdf',
+        });
+        connectionEvents.emit('Browser.downloadProgress', {
+          guid: 'guid-1',
+          totalBytes: 100,
+          receivedBytes: 50,
+          state: 'inProgress',
+        });
+
+        const inProgress = context.getDownloads({state: 'inProgress'});
+        assert.strictEqual(inProgress.length, 1);
+        assert.strictEqual(inProgress[0].receivedBytes, 50);
+
+        connectionEvents.emit('Browser.downloadProgress', {
+          guid: 'guid-1',
+          totalBytes: 100,
+          receivedBytes: 100,
+          state: 'completed',
+          filePath: '/tmp/downloads/guid-1',
+        });
+
+        const completed = await waiterPromise;
+        assert.strictEqual(completed.guid, 'guid-1');
+        assert.strictEqual(completed.filePath, '/tmp/downloads/guid-1');
+      } finally {
+        context.dispose();
+      }
+      if (downloadDir) {
+        await assert.rejects(fs.stat(downloadDir), {code: 'ENOENT'});
+      }
+    });
+
+    it('auto-enables downloads on startup when --isolated is true', async () => {
+      const {EventEmitter} = await import('../src/third_party/browser.js');
+      const connectionEvents = new EventEmitter<Record<PropertyKey, unknown>>();
+      const mockConnection = {
+        on: sinon.stub().callsFake(connectionEvents.on.bind(connectionEvents)),
+        off: sinon
+          .stub()
+          .callsFake(connectionEvents.off.bind(connectionEvents)),
+        send: sinon.stub().resolves({}),
+      };
+
+      const browser = createMockPuppeteerBrowser();
+      browser.targets.returns([
+        createMockPuppeteerTarget({page: createMockPuppeteerPage()}),
+      ]);
+      Object.defineProperty(browser, '_connection', {
+        value: mockConnection,
+        configurable: true,
+      });
+
+      const taskRunner = new TaskRunner();
+      const context = McpContext.create(sinon.stub(), {
+        config: createMockServerConfig({isolated: true}),
+        heapSnapshotManager: new HeapSnapshotManager(taskRunner),
+        taskRunner,
+        getBrowser: async () => browser,
+      });
+      let downloadDir: string | undefined;
+      try {
+        await context.ensureBrowser();
+        downloadDir = context.getDownloadDirectory();
+        assert.ok(downloadDir);
+        sinon.assert.calledWith(
+          mockConnection.send,
+          'Browser.setDownloadBehavior',
+          sinon.match({
+            behavior: 'allowAndName',
+            downloadPath: downloadDir,
+            eventsEnabled: true,
+          }),
+        );
+      } finally {
+        context.dispose();
+      }
+      if (downloadDir) {
+        await assert.rejects(fs.stat(downloadDir), {code: 'ENOENT'});
+      }
+    });
+
+    it('rebindPageByTargetId recovers an active frame for an existing targetId', async () => {
+      const pptrPage = createMockPuppeteerPage();
+      pptrPage.url.returns('https://example.com/rebound');
+      const mainFrame = pptrPage.mainFrame();
+      Object.defineProperty(mainFrame, '_id', {
+        value: 'rebound-frame-1',
+        configurable: true,
+      });
+      Object.defineProperty(mainFrame, 'detached', {
+        value: false,
+        configurable: true,
+      });
+      const target = createMockPuppeteerTarget({
+        page: pptrPage,
+        url: 'https://example.com/rebound',
+      });
+      const browser = createMockPuppeteerBrowser();
+      browser.targets.returns([target]);
+      const taskRunner = new TaskRunner();
+      const context = McpContext.create(sinon.stub(), {
+        config: createMockServerConfig(),
+        heapSnapshotManager: new HeapSnapshotManager(taskRunner),
+        taskRunner,
+        getBrowser: async () => browser,
+      });
+      try {
+        await context.ensureBrowser();
+
+        const page = context.getSelectedMcpPage();
+        const recovery = await context.rebindPageByTargetId(page.targetId, {
+          previousPage: page,
+        });
+        assert.strictEqual(recovery.recovered, true);
+        assert.strictEqual(recovery.frameId, 'rebound-frame-1');
+        assert.strictEqual(recovery.url, 'https://example.com/rebound');
+      } finally {
+        context.dispose();
+      }
+    });
+  });
 });

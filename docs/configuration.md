@@ -74,6 +74,15 @@ The Chrome DevTools MCP server supports the following configuration option:
   - **Type:** boolean
   - **Default:** `false`
 
+- **`--cuaProxy`/ `--cua-proxy`**
+  If specified, connects to the user's running Chrome profile via a long-lived cua-ycwang local CDP proxy (existing_profile), launching Chrome if needed and automatically recovering expired proxy sessions without duplicate consent prompts.
+  - **Type:** boolean
+  - **Default:** `false`
+
+- **`--cuaCommand`/ `--cua-command`**
+  Executable path or command for the cua-ycwang MCP server used with --cuaProxy (defaults to ~/.local/bin/cua-ycwang or cua-ycwang on PATH).
+  - **Type:** string
+
 - **`--browserUrl`/ `--browser-url`, `-u`**
   Connect to a running, debuggable Chrome instance (e.g. `http://127.0.0.1:9222`). For more details see: https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/advanced-usage.md#connecting-to-a-running-chrome-instance.
   - **Type:** string
@@ -226,6 +235,16 @@ The Chrome DevTools MCP server supports the following configuration option:
 
 - **`--backgroundNewPages`/ `--background-new-pages`**
   Set to true to open every page created by new_page in the background, without bringing it to the front, whatever the tool call passes for background. Useful when several agents or the user share one visible browser and new tabs should not take focus.
+  - **Type:** boolean
+  - **Default:** `false`
+
+- **`--interceptDownloads`/ `--intercept-downloads`**
+  Set to true to redirect browser downloads into a temporary directory and track them automatically on attach. By default this is enabled only for --isolated sessions or on demand when list_downloads / wait_for_download is called.
+  - **Type:** boolean
+  - **Default:** `false`
+
+- **`--interceptFileChooser`/ `--intercept-file-chooser`**
+  Set to true to intercept Page.fileChooserOpened dialogs on every page automatically instead of letting native OS file pickers open. By default this is off until enabled via handle_file_chooser or network_monitors.json.
   - **Type:** boolean
   - **Default:** `false`
 

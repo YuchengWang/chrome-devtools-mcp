@@ -39,7 +39,11 @@ import type {
   DuplicateStringGroup,
 } from './processors/HeapSnapshotManager.js';
 import type {McpContext} from './McpContext.js';
-import type {McpPage} from './McpPage.js';
+import type {
+  AuthChallengeInfo,
+  McpPage,
+  PendingFileChooserInfo,
+} from './McpPage.js';
 import {UncaughtError} from './collectors/PageCollector.js';
 import {TextSnapshot} from './TextSnapshot.js';
 import {
@@ -1028,6 +1032,14 @@ export class McpResponse implements Response {
         message: string;
         defaultValue?: string;
       };
+      dialogs?: Array<{
+        index: number;
+        type: string;
+        message: string;
+        defaultValue?: string;
+      }>;
+      pendingFileChoosers?: PendingFileChooserInfo[];
+      pendingAuthChallenges?: AuthChallengeInfo[];
       pages?: object[];
       openedPages?: object[];
       pagination?: object;
@@ -1195,19 +1207,51 @@ export class McpResponse implements Response {
     }
 
     const dialog = this.#page?.getDialog();
+    const dialogs = this.#page?.getDialogs?.() ?? [];
     if (dialog) {
       const defaultValueIfNeeded =
         dialog.type() === 'prompt'
           ? ` (default value: "${dialog.defaultValue()}")`
           : '';
+      const queueNote =
+        dialogs.length > 1
+          ? `\nQueued dialogs: ${dialogs.length} (showing slot 0; pass slotIndex or all=true to ${handleDialog(this.#config.resolved).name}).`
+          : '';
       response.push(`# Open dialog
 ${dialog.type()}: ${dialog.message()}${defaultValueIfNeeded}.
-Call ${handleDialog(this.#config.resolved).name} to handle it before continuing.`);
+Call ${handleDialog(this.#config.resolved).name} to handle it before continuing.${queueNote}`);
       structuredContent.dialog = {
         type: dialog.type(),
         message: dialog.message(),
         defaultValue: dialog.defaultValue(),
       };
+      if (dialogs.length > 1) {
+        structuredContent.dialogs = dialogs.map(entry => ({
+          index: entry.index,
+          type: entry.type,
+          message: entry.message,
+          defaultValue: entry.defaultValue,
+        }));
+      }
+    }
+
+    const pendingFileChoosers = this.#page?.getPendingFileChoosers?.() ?? [];
+    if (pendingFileChoosers.length > 0) {
+      const latestChooser = pendingFileChoosers[0];
+      response.push(`# Pending file chooser
+${pendingFileChoosers.length} intercepted file chooser(s) waiting (slot 0: mode=${latestChooser.mode}, frameId=${latestChooser.frameId}).
+Call handle_file_chooser to accept with filePaths or cancel it.`);
+      structuredContent.pendingFileChoosers = pendingFileChoosers;
+    }
+
+    const pendingAuthChallenges =
+      this.#page?.getPendingAuthChallenges?.() ?? [];
+    if (pendingAuthChallenges.length > 0) {
+      const latestAuth = pendingAuthChallenges[0];
+      response.push(`# Pending auth challenge
+${pendingAuthChallenges.length} HTTP auth challenge(s) waiting (${latestAuth.challengeId}: ${latestAuth.source} ${latestAuth.scheme} realm="${latestAuth.realm}" on ${latestAuth.url}).
+Call handle_auth_challenge to provide credentials, cancel, or set policy.`);
+      structuredContent.pendingAuthChallenges = pendingAuthChallenges;
     }
 
     if (this.#includePages) {

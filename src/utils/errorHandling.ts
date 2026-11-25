@@ -72,6 +72,36 @@ export function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
+const DETACHED_NAVIGATION_PATTERNS = [
+  'navigating frame was detached',
+  'navigation detached',
+  'frame detached',
+  'frame got detached',
+  'attempted to use detached frame',
+  'execution context is not available in detached frame',
+  'execution context was destroyed',
+  'cannot find context with specified id',
+  'waiting failed: frame detached',
+];
+
+/**
+ * Returns true if `err` indicates a Puppeteer/CDP frame or execution context
+ * detachment while the browser target may still be alive on a newer frame.
+ */
+export function isDetachedNavigationError(err: unknown): boolean {
+  const message = getErrorMessage(err).toLowerCase();
+  return DETACHED_NAVIGATION_PATTERNS.some(pattern =>
+    message.includes(pattern),
+  );
+}
+
+/**
+ * Validates that a string compiles cleanly as a JavaScript RegExp.
+ */
+export function compileRegex(pattern: string, flags?: string): RegExp {
+  return new RegExp(pattern, flags);
+}
+
 export function setupUnhandledRejectionHandler(onCrash: () => void): void {
   process.on('unhandledRejection', (reason, promise) => {
     logger?.('Unhandled promise rejection:', promise, reason);

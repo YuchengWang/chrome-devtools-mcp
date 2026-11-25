@@ -449,6 +449,38 @@ export function createMockMcpPage(
   page.getConsoleDataAfter.returns([]);
   page.discoverThirdPartyDeveloperTools.resolves([]);
   page.getWebAuthnAuthenticator.returns(undefined);
+  page.getDialogs.returns([]);
+  page.withNativeFileChooser.callsFake(fn => fn());
+  page.getPendingFileChoosers.returns([]);
+  page.getPendingAuthChallenges.returns([]);
+  page.getAuthChallengeHistory.returns([]);
+  page.listWebSocketConnections.returns([]);
+  page.pollWsFrames.returns({
+    entries: [],
+    latestSeq: 0,
+    oldestSeq: 0,
+    droppedCount: 0,
+  });
+  page.pollSseEvents.returns({
+    entries: [],
+    latestSeq: 0,
+    oldestSeq: 0,
+    droppedCount: 0,
+  });
+  page.pollNetworkAlerts.returns({
+    entries: [],
+    latestSeq: 0,
+    oldestSeq: 0,
+    droppedCount: 0,
+  });
+  page.recoverDetachedFrame.resolves({
+    recovered: false,
+    targetId: 'mock-target-id',
+  });
+  Object.defineProperty(page, 'targetId', {
+    get: () => target._getTargetInfo().targetId,
+    configurable: true,
+  });
   Object.defineProperty(page, 'pptrPage', {
     value: pptrPage,
     writable: true,
@@ -553,6 +585,13 @@ export function createMockMcpContext(
   context.getSelectedMcpPage.returns(page satisfies McpPage);
   context.getPages.returns([page]);
   context.getTargetInfos.resolves(new Map());
+  context.getDownloads.returns([]);
+  context.enableDownloads.resolves();
+  context.getDownloadDirectory.returns('/tmp');
+  context.rebindPageByTargetId.resolves({
+    recovered: false,
+    targetId: 'mock-target-id',
+  });
   context.saveTemporaryFile.callsFake(async (_data, filename) => ({
     filepath: `/tmp/${filename}`,
   }));

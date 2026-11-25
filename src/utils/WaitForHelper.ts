@@ -136,7 +136,7 @@ export class WaitForHelper {
       throw new Error("Can't re-use a WaitForHelper");
     }
     const dialogHandler = (
-      dialog: Pick<Dialog, 'accept' | 'dismiss' | 'type'>,
+      dialog: Pick<Dialog, 'accept' | 'dismiss' | 'type'> & {handled?: boolean},
     ): void => {
       this.#dialogDetected = true;
 
@@ -146,6 +146,12 @@ export class WaitForHelper {
         actionToTake = options.handleDialog[dialog.type()];
       } else {
         actionToTake = options?.handleDialog;
+      }
+
+      if (!actionToTake && dialog.handled) {
+        // Already handled synchronously by McpPage's auto_dialog_policy.
+        this.#dialogHandled = true;
+        return;
       }
 
       if (actionToTake) {

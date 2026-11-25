@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,10 +23,16 @@ import type {
 } from './processors/HeapSnapshotManager.js';
 import {McpPage} from './McpPage.js';
 import type {UncaughtError} from './collectors/PageCollector.js';
+import {
+  isCdpSessionLike,
+  type CdpSessionLike,
+} from './collectors/RealtimeNetworkCollector.js';
 import {ServiceWorkerCollector} from './collectors/ServiceWorkerCollector.js';
+import {NetworkMonitorsManager} from './config/NetworkMonitorsConfig.js';
 import {Mutex, type Root} from './third_party/index.js';
 import {
   Locator,
+  TimeoutError,
   type Browser,
   type BrowserContext,
   type Connection,
@@ -51,12 +58,14 @@ import {
   type BrowserlessContext,
   type CapabilityGate,
   type Context,
+  type ContextPage,
   type DevToolsData,
   type SupportedExtensions,
 } from './tools/ToolDefinition.js';
 import type {TraceResult} from './processors/PerformanceTrace.js';
 import type {ConnectBrowserOptions, Logger} from './types.js';
 import {McpWorker} from './McpWorker.js';
+import {getErrorMessage} from './utils/errorHandling.js';
 import {
   fileUrlToPathWithPosixFallback,
   getTempFilePath,
@@ -70,6 +79,51 @@ import {
 import type {TaskQueue, TaskRunner} from './utils/TaskRunner.js';
 import {isAllowedUrl} from './utils/url.js';
 
+export type DownloadState = 'inProgress' | 'completed' | 'canceled';
+
+export interface DownloadEntry {
+  guid: string;
+  url: string;
+  suggestedFilename: string;
+  filePath?: string;
+  state: DownloadState;
+  frameId?: string;
+  totalBytes: number;
+  receivedBytes: number;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
+export interface WaitForDownloadOptions {
+  guid?: string;
+  filenameRegex?: RegExp;
+  urlRegex?: RegExp;
+  timeoutMs?: number;
+  includeExistingCompleted?: boolean;
+  sinceTimestamp?: number;
+}
+
+export interface RebindPageResult {
+  recovered: boolean;
+  targetId: string;
+  page?: McpPage;
+  frameId?: string;
+  url?: string;
+  pageSwapped?: boolean;
+  selectedPageChanged?: boolean;
+  fallbackPage?: McpPage;
+}
+
+interface DownloadWaiter {
+  matches: (entry: DownloadEntry) => boolean;
+  resolve: (entry: DownloadEntry) => void;
+  reject: (err: Error) => void;
+}
+
+const MAX_DOWNLOAD_ENTRIES = 100;
+const DEFAULT_DOWNLOAD_WAIT_TIMEOUT_MS = 30_000;
+
 export interface McpContextOptions {
   config: ReadonlyServerConfig;
   // Custom navigation timeout in milliseconds to override default.
@@ -78,6 +132,8 @@ export interface McpContextOptions {
   heapSnapshotManager: HeapSnapshotManager;
   // Creates the context queue and the page queues.
   taskRunner: TaskRunner;
+  // Optional monitor manager instance (used by tests).
+  monitorsManager?: NetworkMonitorsManager;
   // Returns the browser to use. Called by ensureBrowser(), so the browser
   // connection is only established once a tool needs it.
   getBrowser: () => Promise<Browser>;
@@ -124,6 +180,14 @@ const FEATURE_CONTROLLERS: readonly FeatureController[] = [
   {
     gate: {options: ['experimentalIncludeAllPages']},
     onChange: context => context.createPagesSnapshot(),
+  },
+  {
+    gate: {options: ['interceptDownloads']},
+    onChange: context => context.syncDownloadInterception(),
+  },
+  {
+    gate: {options: ['interceptFileChooser']},
+    onChange: context => context.syncFileChooserInterception(),
   },
   {
     gate: {category: ToolCategory.DEBUGGING},
@@ -197,7 +261,20 @@ export class McpContext implements Context, BrowserlessContext {
   #config: ReadonlyServerConfig;
   #options: McpContextOptions;
   #heapSnapshotManager: HeapSnapshotManager;
+  #monitorsManager: NetworkMonitorsManager;
   #roots: Root[] | undefined = undefined;
+
+  #downloads = new Map<string, DownloadEntry>();
+  #downloadOrder: string[] = [];
+  #downloadDir?: string;
+  #downloadDirPromise?: Promise<string>;
+  #downloadConnection?: CdpSessionLike;
+  #downloadsConfiguredForBrowser?: Browser;
+  #configuredDownloadContexts = new WeakSet<BrowserContext>();
+  #downloadWaiters = new Set<DownloadWaiter>();
+  #isIsolatedBrowser: boolean;
+  #downloadsExplicitlyEnabled = false;
+  #monitorsUnsubscribe?: () => void;
 
   private constructor(
     logger: Logger,
@@ -216,7 +293,21 @@ export class McpContext implements Context, BrowserlessContext {
     this.taskQueue = options.taskRunner.createQueue();
     this.#config = options.config;
     this.#options = options;
+    this.#isIsolatedBrowser = Boolean(options.config.resolved.isolated);
     this.#heapSnapshotManager = options.heapSnapshotManager;
+    this.#monitorsManager =
+      options.monitorsManager ??
+      new NetworkMonitorsManager({
+        validatePath: filePath => this.validatePath(filePath),
+        getAllowedRoots: () =>
+          this.roots().map(root =>
+            path.resolve(fileUrlToPathWithPosixFallback(root.uri)),
+          ),
+      });
+    this.#monitorsManager.start();
+    this.#monitorsUnsubscribe = this.#monitorsManager.onConfigChange(() => {
+      void this.syncDownloadInterception();
+    });
   }
 
   /**
@@ -398,6 +489,11 @@ export class McpContext implements Context, BrowserlessContext {
     }
     return await this.#options.connectBrowser(options, async browser => {
       this.#resetBrowserState();
+      this.#isIsolatedBrowser = Boolean(
+        options.isolated ??
+        (options.incognito && options.userDataDir === undefined),
+      );
+      this.#downloadsExplicitlyEnabled = false;
       this.#browser = browser;
       const ready = this.#initBrowserState(browser);
       this.#browserReady = ready;
@@ -413,6 +509,17 @@ export class McpContext implements Context, BrowserlessContext {
     });
   }
 
+  #shouldEnableDownloads(): boolean {
+    return (
+      this.#downloadsExplicitlyEnabled ||
+      this.#isIsolatedBrowser ||
+      Boolean(
+        this.#monitorsManager?.getConfig().interceptDownloads ||
+        this.#config.resolved.interceptDownloads,
+      )
+    );
+  }
+
   async #initBrowserState(browser: Browser): Promise<void> {
     const collector = new ServiceWorkerCollector(browser);
     this.#serviceWorkerCollector = collector;
@@ -421,9 +528,14 @@ export class McpContext implements Context, BrowserlessContext {
     // that installs a different browser removes them in #resetBrowserState().
     browser.on('targetcreated', this.#onTargetCreated);
     browser.on('targetdestroyed', this.#onTargetDestroyed);
+    const shouldTrackDownloads = this.#shouldEnableDownloads();
+    if (shouldTrackDownloads) {
+      this.#attachDownloadListeners(browser);
+    }
     await Promise.all([
       collector.init(this.createWorkersSnapshot()),
       this.createPagesSnapshot(),
+      shouldTrackDownloads ? this.#enableDownloads(browser) : Promise.resolve(),
     ]);
     // The state now belongs to the browser of a later call, leave it intact.
     if (this.#browser !== browser) {
@@ -439,6 +551,8 @@ export class McpContext implements Context, BrowserlessContext {
   #resetBrowserState(): void {
     this.#browser?.off('targetcreated', this.#onTargetCreated);
     this.#browser?.off('targetdestroyed', this.#onTargetDestroyed);
+    this.#detachDownloadListeners();
+    this.#downloadsConfiguredForBrowser = undefined;
 
     this.#serviceWorkerCollector?.dispose();
     for (const mcpPage of this.#allMcpPages()) {
@@ -450,6 +564,15 @@ export class McpContext implements Context, BrowserlessContext {
     // Either the entire browser will be closed or we disconnect
     // without destroying browser state.
     this.#isolatedContexts.clear();
+    this.#configuredDownloadContexts = new WeakSet();
+    this.#downloads.clear();
+    this.#downloadOrder = [];
+    for (const waiter of this.#downloadWaiters) {
+      waiter.reject(
+        new Error('Browser connection reset while waiting for download.'),
+      );
+    }
+    this.#downloadWaiters.clear();
     this.#nextIsolatedContextId = 1;
     this.#selectedPage = undefined;
     this.#selectedPageFallback = undefined;
@@ -461,7 +584,37 @@ export class McpContext implements Context, BrowserlessContext {
   }
 
   dispose(): void {
+    this.#monitorsUnsubscribe?.();
+    this.#monitorsUnsubscribe = undefined;
     this.#resetBrowserState();
+    this.#cleanupDownloadDir();
+    if (!this.#options.monitorsManager) {
+      this.#monitorsManager.dispose();
+    }
+  }
+
+  #cleanupDownloadDir(): void {
+    const dir = this.#downloadDir;
+    const dirPromise = this.#downloadDirPromise;
+    this.#downloadDir = undefined;
+    this.#downloadDirPromise = undefined;
+    if (dir) {
+      try {
+        fsSync.rmSync(dir, {recursive: true, force: true});
+      } catch (err) {
+        this.logger?.(
+          `Failed to remove temp download directory ${dir}: ${getErrorMessage(err)}`,
+        );
+      }
+    } else if (dirPromise) {
+      void dirPromise
+        .then(resolvedDir => fs.rm(resolvedDir, {recursive: true, force: true}))
+        .catch(err => {
+          this.logger?.(
+            `Failed to remove pending temp download directory: ${getErrorMessage(err)}`,
+          );
+        });
+    }
   }
 
   #onTargetCreated = (target: Target): void => {
@@ -635,6 +788,9 @@ export class McpContext implements Context, BrowserlessContext {
       if (!ctx) {
         ctx = await this.browser.createBrowserContext();
         this.#isolatedContexts.set(isolatedContextName, ctx);
+        if (this.#shouldEnableDownloads()) {
+          await this.#configureDownloadBehaviorForContext(this.browser, ctx);
+        }
       }
       page = await ctx.newPage({background});
     } else {
@@ -946,6 +1102,9 @@ export class McpContext implements Context, BrowserlessContext {
         const name = `isolated-context-${this.#nextIsolatedContextId++}`;
         this.#isolatedContexts.set(name, ctx);
         contextToName.set(ctx, name);
+        if (this.#shouldEnableDownloads()) {
+          void this.#configureDownloadBehaviorForContext(this.browser, ctx);
+        }
       }
     }
     return contextToName;
@@ -963,6 +1122,7 @@ export class McpContext implements Context, BrowserlessContext {
           target.browserContext(),
         ),
         navigationTimeout: this.#options.navigationTimeout,
+        monitorsManager: this.#monitorsManager,
       });
     }
     this.#mcpPages.set(target, mcpPage);
@@ -1361,4 +1521,451 @@ export class McpContext implements Context, BrowserlessContext {
       classIndex,
     );
   }
+
+  getNetworkMonitorsManager(): NetworkMonitorsManager {
+    return this.#monitorsManager;
+  }
+
+  getDownloadDirectory(): string | undefined {
+    return this.#downloadDir;
+  }
+
+  async enableDownloads(): Promise<void> {
+    this.#downloadsExplicitlyEnabled = true;
+    if (this.#browser) {
+      this.#attachDownloadListeners(this.#browser);
+      await this.#enableDownloads(this.#browser);
+    }
+  }
+
+  async syncDownloadInterception(): Promise<void> {
+    if (!this.#browser || !this.#shouldEnableDownloads()) {
+      return;
+    }
+    this.#attachDownloadListeners(this.#browser);
+    await this.#enableDownloads(this.#browser);
+  }
+
+  async syncFileChooserInterception(): Promise<void> {
+    for (const mcpPage of this.#allMcpPages()) {
+      await mcpPage.syncFileChooserInterception();
+    }
+  }
+
+  getDownloads(
+    options: {state?: DownloadState; limit?: number} = {},
+  ): DownloadEntry[] {
+    const entries: DownloadEntry[] = [];
+    for (let i = this.#downloadOrder.length - 1; i >= 0; i--) {
+      const entry = this.#downloads.get(this.#downloadOrder[i]);
+      if (!entry) {
+        continue;
+      }
+      if (options.state && entry.state !== options.state) {
+        continue;
+      }
+      entries.push({...entry});
+      if (options.limit !== undefined && entries.length >= options.limit) {
+        break;
+      }
+    }
+    return entries;
+  }
+
+  async waitForDownload(
+    options: WaitForDownloadOptions = {},
+  ): Promise<DownloadEntry> {
+    await this.enableDownloads();
+    const timeoutMs = options.timeoutMs ?? DEFAULT_DOWNLOAD_WAIT_TIMEOUT_MS;
+    const includeExistingCompleted = options.includeExistingCompleted ?? true;
+    const matchesMeta = (entry: DownloadEntry): boolean => {
+      if (options.guid && entry.guid !== options.guid) {
+        return false;
+      }
+      if (
+        options.sinceTimestamp !== undefined &&
+        entry.createdAt < options.sinceTimestamp
+      ) {
+        return false;
+      }
+      if (options.filenameRegex) {
+        options.filenameRegex.lastIndex = 0;
+        if (!options.filenameRegex.test(entry.suggestedFilename)) {
+          return false;
+        }
+      }
+      if (options.urlRegex) {
+        options.urlRegex.lastIndex = 0;
+        if (!options.urlRegex.test(entry.url)) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const activeInProgressGuids = new Set<string>();
+    for (let i = this.#downloadOrder.length - 1; i >= 0; i--) {
+      const existing = this.#downloads.get(this.#downloadOrder[i]);
+      if (!existing || !matchesMeta(existing)) {
+        continue;
+      }
+      if (existing.state === 'completed' && includeExistingCompleted) {
+        return {...existing};
+      }
+      if (existing.state === 'canceled' && options.guid) {
+        throw new Error(
+          `Download ${existing.guid} (${existing.suggestedFilename}) was canceled.`,
+        );
+      }
+      if (existing.state === 'inProgress') {
+        activeInProgressGuids.add(existing.guid);
+      }
+    }
+
+    if (timeoutMs <= 0) {
+      throw new TimeoutError(
+        'Timed out waiting for download (timeoutMs <= 0 and no matching download completed).',
+      );
+    }
+
+    return await new Promise<DownloadEntry>((resolve, reject) => {
+      let settled = false;
+      const waiter: DownloadWaiter = {
+        matches: entry => {
+          if (!matchesMeta(entry)) {
+            return false;
+          }
+          if (entry.state === 'completed') {
+            return true;
+          }
+          if (
+            entry.state === 'canceled' &&
+            (Boolean(options.guid) || activeInProgressGuids.has(entry.guid))
+          ) {
+            return true;
+          }
+          return false;
+        },
+        resolve: entry => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          this.#downloadWaiters.delete(waiter);
+          if (entry.state === 'canceled') {
+            reject(
+              new Error(
+                `Download ${entry.guid} (${entry.suggestedFilename}) was canceled.`,
+              ),
+            );
+            return;
+          }
+          resolve({...entry});
+        },
+        reject: err => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          this.#downloadWaiters.delete(waiter);
+          reject(err);
+        },
+      };
+
+      const timer = setTimeout(() => {
+        waiter.reject(
+          new TimeoutError(
+            `Timed out after ${timeoutMs}ms waiting for download` +
+              `${options.guid ? ` (guid=${options.guid})` : ''}.`,
+          ),
+        );
+      }, timeoutMs);
+
+      this.#downloadWaiters.add(waiter);
+    });
+  }
+
+  async rebindPageByTargetId(
+    targetId: string,
+    options: {previousPage?: ContextPage} = {},
+  ): Promise<RebindPageResult> {
+    const previousPage = options.previousPage
+      ? this.#findPageById(options.previousPage.id)
+      : undefined;
+    if (previousPage) {
+      previousPage.textSnapshot = null;
+      previousPage.uniqueBackendNodeIdToMcpId.clear();
+    }
+
+    const pages = await this.createPagesSnapshot();
+    const candidate = pages.find(page => {
+      if (page.isClosed()) {
+        return false;
+      }
+      try {
+        return page.targetId === targetId;
+      } catch {
+        return false;
+      }
+    });
+
+    if (candidate) {
+      const recovery = await candidate.recoverDetachedFrame();
+      if (recovery.recovered) {
+        await candidate.init({emulateFocus: false});
+        const shouldSelect =
+          !this.#selectedPage ||
+          this.#selectedPage === previousPage ||
+          this.#selectedPage.isClosed();
+        let selectedPageChanged = false;
+        if (shouldSelect && this.#selectedPage !== candidate) {
+          this.selectPage(candidate);
+          selectedPageChanged = true;
+        }
+        return {
+          recovered: true,
+          targetId,
+          page: candidate,
+          frameId: recovery.frameId,
+          url: recovery.url,
+          pageSwapped: recovery.pageSwapped,
+          selectedPageChanged,
+        };
+      }
+    }
+
+    return {
+      recovered: false,
+      targetId,
+      fallbackPage:
+        this.#selectedPage && !this.#selectedPage.isClosed()
+          ? this.#selectedPage
+          : undefined,
+    };
+  }
+
+  #getBrowserConnection(browser: Browser): CdpSessionLike | undefined {
+    try {
+      // @ts-expect-error use existing browser connection (internal Puppeteer API).
+      const candidate: unknown = browser._connection;
+      return isCdpSessionLike(candidate) ? candidate : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async #ensureDownloadDir(): Promise<string> {
+    if (this.#downloadDir) {
+      return this.#downloadDir;
+    }
+    if (!this.#downloadDirPromise) {
+      this.#downloadDirPromise = fs
+        .mkdtemp(path.join(os.tmpdir(), 'chrome-devtools-mcp-downloads-'))
+        .then(dir => {
+          this.#downloadDir = dir;
+          return dir;
+        });
+    }
+    return await this.#downloadDirPromise;
+  }
+
+  #attachDownloadListeners(browser: Browser): void {
+    const connection = this.#getBrowserConnection(browser);
+    if (!connection || this.#downloadConnection === connection) {
+      return;
+    }
+    this.#detachDownloadListeners();
+    this.#downloadConnection = connection;
+    connection.on('Browser.downloadWillBegin', this.#onDownloadWillBegin);
+    connection.on('Browser.downloadProgress', this.#onDownloadProgress);
+  }
+
+  #detachDownloadListeners(): void {
+    this.#downloadConnection?.off(
+      'Browser.downloadWillBegin',
+      this.#onDownloadWillBegin,
+    );
+    this.#downloadConnection?.off(
+      'Browser.downloadProgress',
+      this.#onDownloadProgress,
+    );
+    this.#downloadConnection = undefined;
+  }
+
+  async #enableDownloads(browser: Browser): Promise<void> {
+    const connection = this.#getBrowserConnection(browser);
+    if (!connection) {
+      return;
+    }
+    try {
+      const downloadDir = await this.#ensureDownloadDir();
+      if (this.#browser !== browser) {
+        return;
+      }
+      if (this.#downloadsConfiguredForBrowser !== browser) {
+        await connection.send('Browser.setDownloadBehavior', {
+          behavior: 'allowAndName',
+          downloadPath: downloadDir,
+          eventsEnabled: true,
+        });
+        this.#downloadsConfiguredForBrowser = browser;
+      }
+      const contextsToConfigure = new Set<BrowserContext>(
+        this.#isolatedContexts.values(),
+      );
+      if (typeof browser.browserContexts === 'function') {
+        const defaultCtx = browser.defaultBrowserContext?.();
+        for (const ctx of browser.browserContexts()) {
+          if (ctx !== defaultCtx && !ctx.closed) {
+            contextsToConfigure.add(ctx);
+          }
+        }
+      }
+      for (const ctx of contextsToConfigure) {
+        if (!ctx.closed) {
+          await this.#configureDownloadBehaviorForContext(browser, ctx);
+        }
+      }
+    } catch (err) {
+      this.logger?.(
+        `Failed to enable global download tracking: ${getErrorMessage(err)}`,
+      );
+    }
+  }
+
+  async #configureDownloadBehaviorForContext(
+    browser: Browser,
+    ctx: BrowserContext,
+  ): Promise<void> {
+    if (this.#configuredDownloadContexts.has(ctx) || !ctx.id) {
+      return;
+    }
+    const connection = this.#getBrowserConnection(browser);
+    if (!connection) {
+      return;
+    }
+    try {
+      const downloadDir = await this.#ensureDownloadDir();
+      if (this.#browser !== browser || ctx.closed) {
+        return;
+      }
+      await connection.send('Browser.setDownloadBehavior', {
+        behavior: 'allowAndName',
+        downloadPath: downloadDir,
+        browserContextId: ctx.id,
+        eventsEnabled: true,
+      });
+      this.#configuredDownloadContexts.add(ctx);
+    } catch (err) {
+      this.logger?.(
+        `Failed to configure download behavior for context ${ctx.id}: ${getErrorMessage(err)}`,
+      );
+    }
+  }
+
+  #recordNewDownloadEntry(entry: DownloadEntry): void {
+    this.#downloads.set(entry.guid, entry);
+    this.#downloadOrder.push(entry.guid);
+    while (this.#downloadOrder.length > MAX_DOWNLOAD_ENTRIES) {
+      const evicted = this.#downloadOrder.shift();
+      if (evicted !== undefined) {
+        this.#downloads.delete(evicted);
+      }
+    }
+  }
+
+  #onDownloadWillBegin = (payload: unknown): void => {
+    if (!isDownloadRecord(payload)) {
+      return;
+    }
+    const guid = typeof payload.guid === 'string' ? payload.guid : undefined;
+    const url = typeof payload.url === 'string' ? payload.url : undefined;
+    const suggestedFilename =
+      typeof payload.suggestedFilename === 'string'
+        ? payload.suggestedFilename
+        : undefined;
+    const frameId =
+      typeof payload.frameId === 'string' ? payload.frameId : undefined;
+    if (!guid || url === undefined || suggestedFilename === undefined) {
+      return;
+    }
+    const now = Date.now();
+    const existing = this.#downloads.get(guid);
+    if (existing) {
+      existing.url = url;
+      existing.suggestedFilename = suggestedFilename;
+      existing.frameId = frameId ?? existing.frameId;
+      existing.updatedAt = now;
+      return;
+    }
+    this.#recordNewDownloadEntry({
+      guid,
+      url,
+      suggestedFilename,
+      state: 'inProgress',
+      frameId,
+      totalBytes: 0,
+      receivedBytes: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+  };
+
+  #onDownloadProgress = (payload: unknown): void => {
+    if (!isDownloadRecord(payload)) {
+      return;
+    }
+    const guid = typeof payload.guid === 'string' ? payload.guid : undefined;
+    const state = parseDownloadState(payload.state);
+    if (!guid || !state) {
+      return;
+    }
+    const now = Date.now();
+    let entry = this.#downloads.get(guid);
+    if (!entry) {
+      entry = {
+        guid,
+        url: '',
+        suggestedFilename: guid,
+        state,
+        totalBytes: 0,
+        receivedBytes: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.#recordNewDownloadEntry(entry);
+    }
+    if (typeof payload.totalBytes === 'number') {
+      entry.totalBytes = payload.totalBytes;
+    }
+    if (typeof payload.receivedBytes === 'number') {
+      entry.receivedBytes = payload.receivedBytes;
+    }
+    entry.state = state;
+    entry.updatedAt = now;
+    if (typeof payload.filePath === 'string' && payload.filePath.length > 0) {
+      entry.filePath = payload.filePath;
+    }
+    if (state === 'completed' || state === 'canceled') {
+      entry.completedAt = now;
+      for (const waiter of Array.from(this.#downloadWaiters)) {
+        if (waiter.matches(entry)) {
+          waiter.resolve(entry);
+        }
+      }
+    }
+  };
+}
+
+function isDownloadRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function parseDownloadState(value: unknown): DownloadState | undefined {
+  if (value === 'inProgress' || value === 'completed' || value === 'canceled') {
+    return value;
+  }
+  return undefined;
 }

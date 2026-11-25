@@ -220,4 +220,26 @@ describe('ConfigWatcher', () => {
     sinon.assert.calledTwice(onChange);
     sinon.assert.calledWithExactly(onChange.secondCall, '{"headless": false}');
   });
+
+  it('supports allowMissing, watches file creation, and invokes onDelete on removal', async () => {
+    using dir = createTempDir('cd4a-watcher-missing-');
+    const configPath = path.join(dir.path, 'monitors.json');
+    const onChange = sinon.stub().resolves();
+    const onDelete = sinon.stub();
+    using watcher = new ConfigWatcher(configPath, onChange, {
+      debounceMs: DEBOUNCE_MS,
+      allowMissing: true,
+      onDelete,
+    });
+    watcher.start();
+    sinon.assert.notCalled(onChange);
+
+    fs.writeFileSync(configPath, '{"monitors":[]}', 'utf8');
+    await waitForCall(onChange);
+    sinon.assert.calledOnceWithExactly(onChange, '{"monitors":[]}');
+
+    fs.unlinkSync(configPath);
+    await waitForCall(onDelete);
+    sinon.assert.calledOnce(onDelete);
+  });
 });

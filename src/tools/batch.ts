@@ -7,6 +7,7 @@
 import type {ParsedArguments} from '../config/mcp-options.js';
 import {zod} from '../third_party/index.js';
 import type {JSHandle} from '../third_party/browser.js';
+import {isDetachedNavigationError} from '../utils/errorHandling.js';
 import {validateUrl} from '../utils/url.js';
 
 import {ToolCategory} from './categories.js';
@@ -91,8 +92,8 @@ export const batchActions: PageToolFactory = definePageTool(
     blockedByDialog: true,
     concurrency: 'page',
     verifyFilesSchema: {},
-    handler: async (request, response) => {
-      const page = request.page;
+    handler: async (request, response, context) => {
+      let page = request.page;
       const stopOnError = request.params.stopOnError ?? true;
 
       for (let i = 0; i < request.params.actions.length; i++) {
@@ -229,8 +230,28 @@ export const batchActions: PageToolFactory = definePageTool(
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
+          let recoveryNote = '';
+          if (
+            page.pptrPage.browser()?.connected !== false &&
+            isDetachedNavigationError(error)
+          ) {
+            const recovery = await context
+              .rebindPageByTargetId(page.targetId, {previousPage: page})
+              .catch(() => undefined);
+            if (recovery?.recovered) {
+              if (recovery.page) {
+                page = recovery.page;
+              }
+              recoveryNote =
+                ` [self-healed target ${recovery.targetId} -> frameId=${recovery.frameId ?? 'unknown'}, ` +
+                `url=${recovery.url ?? 'unknown'}; snapshot invalidated]`;
+              response.setIncludePages(true);
+            } else {
+              recoveryNote = ` [detached target ${page.targetId} could not rebind; call list_pages or take_snapshot]`;
+            }
+          }
           response.appendResponseLine(
-            `[${i + 1}] ${action.type}: ERROR (${message})`,
+            `[${i + 1}] ${action.type}: ERROR (${message})${recoveryNote}`,
           );
           if (stopOnError) {
             throw error;

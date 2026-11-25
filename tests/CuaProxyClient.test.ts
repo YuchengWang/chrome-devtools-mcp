@@ -484,4 +484,83 @@ rl.on('line', line => {
     await assert.rejects(acquirePromise, /timed out/);
     await client.close();
   });
+
+  it('rotates session and surfaces actionable consent recovery hint on browser_consent_required', async () => {
+    using tempDir = createTempDir('cdm-cua-consent-');
+    const cuaCommand = writeMockCuaScript(
+      tempDir.path,
+      `
+const rl = readline.createInterface({input: process.stdin, crlfDelay: Infinity});
+rl.on('line', line => {
+  if (!line.trim()) return;
+  const req = JSON.parse(line);
+  if (req.id === undefined) return;
+  if (req.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: req.id,
+      result: {protocolVersion: '2024-11-05', capabilities: {tools: {}}},
+    }) + '\\n');
+    return;
+  }
+  if (req.method === 'tools/call') {
+    const {name} = req.params;
+    if (name === 'list_windows') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: req.id,
+        result: {
+          content: [{type: 'text', text: 'ok'}],
+          isError: false,
+          structuredContent: {
+            windows: [{window_id: 55, pid: 5555, is_on_screen: true, z_index: 1}],
+          },
+        },
+      }) + '\\n');
+      return;
+    }
+    if (name === 'browser_prepare') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: req.id,
+        result: {
+          content: [{type: 'text', text: 'the existing-profile grant expired; approve this attachment again'}],
+          isError: true,
+          structuredContent: {
+            status: 'refused',
+            refusal: {
+              code: 'browser_consent_required',
+              message: 'the existing-profile grant expired; approve this attachment again',
+            },
+          },
+        },
+      }) + '\\n');
+    }
+  }
+});
+`,
+    );
+
+    const client = new CuaProxyClient({cuaCommand});
+    assert.strictEqual(client.activeSessionId, 'cua-proxy-1');
+    const controller = new AbortController();
+    await assert.rejects(
+      client.acquireWsEndpoint({signal: controller.signal}),
+      err => {
+        assert.ok(err instanceof Error);
+        assert.strictEqual(
+          (err as Error & {code?: string}).code,
+          'browser_consent_required',
+        );
+        assert.match(
+          err.message,
+          /approve_browser_consent\(pid=5555, window_id=55/,
+        );
+        assert.match(err.message, /8h absolute TTL/);
+        return true;
+      },
+    );
+    assert.strictEqual(client.activeSessionId, 'cua-proxy-2');
+    await client.close();
+  });
 });

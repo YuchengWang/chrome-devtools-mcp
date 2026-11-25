@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  type AuthDefaultAction,
+  type AuthPolicyAction,
+  type DialogPolicyAction,
+  type DialogTypeName,
+  type NetworkMonitorsManager,
+} from './config/NetworkMonitorsConfig.js';
 import type {ReadonlyServerConfig} from './config/ServerConfig.js';
 import {DevToolsCommentBridge} from './devtools/DevToolsCommentBridge.js';
 import {
@@ -16,6 +23,21 @@ import {
   type ListenerMap,
   type UncaughtError,
 } from './collectors/PageCollector.js';
+import {
+  getPageCdpSession,
+  isCdpSessionLike,
+  RealtimeNetworkCollector,
+  type CdpSessionLike,
+  type NetworkAlertCategory,
+  type NetworkAlertData,
+  type NetworkAlertKind,
+  type SseEventData,
+  type WaitForNetworkResponseOptions,
+  type WaitForNetworkResponseResult,
+  type WebSocketConnectionInfo,
+  type WebSocketStatus,
+  type WsFrameData,
+} from './collectors/RealtimeNetworkCollector.js';
 import {LogpointManager} from './LogpointManager.js';
 import type {Logpoint, LogpointOptions} from './utils/logpoint.js';
 import {TextSnapshot} from './TextSnapshot.js';
@@ -34,6 +56,7 @@ import {
   type RunnerResult,
 } from './third_party/index.js';
 import {
+  type CDPSession,
   type Locator,
   type Dialog,
   type ElementHandle,
@@ -46,6 +69,7 @@ import {
   type ConsoleMessage,
   type HTTPRequest,
   DevTools,
+  TimeoutError,
 } from './third_party/browser.js';
 import type {ToolGroups} from './tools/thirdPartyDeveloper.js';
 import type {
@@ -65,8 +89,12 @@ import type {
   PrefersReducedMotion,
   TextSnapshotNode,
 } from './types.js';
-import {getErrorMessage} from './utils/errorHandling.js';
+import {
+  getErrorMessage,
+  isDetachedNavigationError,
+} from './utils/errorHandling.js';
 import {logger} from './utils/logger.js';
+import {RingBuffer, type RingBufferQueryResult} from './utils/RingBuffer.js';
 import {
   getNetworkMultiplierFromString,
   WaitForHelper,
@@ -183,12 +211,213 @@ function isBackendNodeId(
   return typeof id === 'number';
 }
 
+const MAX_DIALOG_SLOTS = 32;
+const MAX_FILE_CHOOSER_SLOTS = 16;
+const MAX_AUTH_HISTORY = 100;
+const MAX_ATTEMPTED_AUTH_IDS = 500;
+const DEFAULT_DIALOG_WAIT_TIMEOUT_MS = 10_000;
+const DEFAULT_DOM_WAIT_TIMEOUT_MS = 10_000;
+const DEFAULT_DOM_POLL_INTERVAL_MS = 100;
+const AUTH_FETCH_PATTERNS = [
+  {urlPattern: 'http://*'},
+  {urlPattern: 'https://*'},
+];
+
+export interface DialogQueueEntry {
+  id: number;
+  index: number;
+  dialog: Dialog;
+  type: Protocol.Page.DialogType;
+  message: string;
+  defaultValue: string;
+  createdAt: number;
+}
+
+export interface WaitForDialogOptions {
+  type?: Protocol.Page.DialogType;
+  messageRegex?: RegExp;
+  timeoutMs?: number;
+}
+
+export interface WaitForDialogResult {
+  id: number;
+  type: Protocol.Page.DialogType;
+  message: string;
+  defaultValue: string;
+  queueLength: number;
+  autoHandled: boolean;
+  autoAction?: DialogPolicyAction;
+}
+
+export interface PendingFileChooserInfo {
+  id: number;
+  frameId: string;
+  mode: 'selectSingle' | 'selectMultiple';
+  backendNodeId?: number;
+  createdAt: number;
+}
+
+export interface HandleFileChooserOptions {
+  action: 'accept' | 'cancel' | 'list' | 'enable' | 'disable';
+  index?: number;
+  filePaths?: string[];
+}
+
+export interface HandleFileChooserResult {
+  action: 'accept' | 'cancel' | 'list' | 'enable' | 'disable';
+  interceptionEnabled?: boolean;
+  handled?: PendingFileChooserInfo;
+  pending: PendingFileChooserInfo[];
+}
+
+export interface AuthChallengeInfo {
+  challengeId: string;
+  requestId: string;
+  url: string;
+  method: string;
+  resourceType: string;
+  frameId: string;
+  source: string;
+  origin: string;
+  scheme: string;
+  realm: string;
+  createdAt: number;
+  status: 'pending' | 'provided' | 'canceled' | 'default';
+  resolvedAt?: number;
+}
+
+export interface HandleAuthChallengeOptions {
+  action: 'provide' | 'cancel' | 'default' | 'list' | 'set_policy';
+  challengeId?: string;
+  username?: string;
+  password?: string;
+  defaultAction?: AuthDefaultAction;
+  originRegex?: RegExp;
+  urlRegex?: RegExp;
+  realmRegex?: RegExp;
+  source?: 'Server' | 'Proxy';
+  queueTimeoutMs?: number;
+}
+
+export interface HandleAuthChallengeResult {
+  action: HandleAuthChallengeOptions['action'];
+  resolved?: AuthChallengeInfo;
+  pending: AuthChallengeInfo[];
+  history: AuthChallengeInfo[];
+  defaultAction: AuthDefaultAction;
+}
+
+export type WaitForDomState = 'visible' | 'hidden' | 'attached' | 'detached';
+
+export interface WaitForDomOptions {
+  selector: string;
+  state?: WaitForDomState;
+  frameId?: string;
+  text?: string;
+  textRegex?: RegExp;
+  attributeName?: string;
+  attributeValue?: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}
+
+export interface WaitForDomResult {
+  matched: boolean;
+  selector: string;
+  state: WaitForDomState;
+  frameId: string;
+  count: number;
+  visibleCount: number;
+  tagName?: string;
+  textPreview?: string;
+  elapsedMs: number;
+}
+
+export interface DetachedFrameRecoveryResult {
+  recovered: boolean;
+  targetId: string;
+  frameId?: string;
+  url?: string;
+  pageSwapped?: boolean;
+}
+
+interface InternalDialogEntry {
+  id: number;
+  dialog: Dialog;
+  type: Protocol.Page.DialogType;
+  message: string;
+  defaultValue: string;
+  createdAt: number;
+}
+
+interface DialogWaiter {
+  type?: Protocol.Page.DialogType;
+  messageRegex?: RegExp;
+  resolve: (result: WaitForDialogResult) => void;
+  reject: (error: Error) => void;
+}
+
+interface PendingAuthEntry {
+  info: AuthChallengeInfo;
+  session: CdpSessionLike;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface RuntimeAuthRule {
+  originRegex?: RegExp;
+  urlRegex?: RegExp;
+  realmRegex?: RegExp;
+  source?: 'Server' | 'Proxy';
+  action: AuthPolicyAction;
+  username?: string;
+  password?: string;
+}
+
+function getFrameId(frame: Frame): string | undefined {
+  if ('_id' in frame && typeof frame._id === 'string') {
+    return frame._id;
+  }
+  return undefined;
+}
+
+function getFrameCdpSession(frame: Frame): CdpSessionLike | undefined {
+  if ('client' in frame && isCdpSessionLike(frame.client)) {
+    return frame.client;
+  }
+  if ('_client' in frame && typeof frame._client === 'function') {
+    const client: unknown = frame._client();
+    return isCdpSessionLike(client) ? client : undefined;
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' ? value : undefined;
+}
+
+function isDialogTypeName(value: string): value is DialogTypeName {
+  return (
+    value === 'alert' ||
+    value === 'confirm' ||
+    value === 'prompt' ||
+    value === 'beforeunload'
+  );
+}
+
 /**
  * Per-page state wrapper. Consolidates dialog, snapshot, emulation,
  * and metadata that were previously scattered across Maps in McpContext.
  *
  * Internal class consumed only by McpContext. Fields are public for direct
- * read/write access. The dialog field is private because it requires an
+ * read/write access. The dialog queue is private because it requires an
  * event listener lifecycle managed by the init/dispose pair.
  */
 export class McpPage implements ContextPage {
@@ -218,9 +447,33 @@ export class McpPage implements ContextPage {
   // Logpoints, created on first use.
   #logpointManager?: LogpointManager;
 
-  // Dialog
-  #dialog?: Dialog;
+  // Multi-slot dialog queue
+  #dialogs: InternalDialogEntry[] = [];
+  #nextDialogId = 1;
+  #dialogWaiters = new Set<DialogWaiter>();
+  #explicitDialogActionDepth = 0;
   #dialogHandler: (dialog: Dialog) => void;
+
+  // FileChooser interception queue
+  #pendingFileChoosers: PendingFileChooserInfo[] = [];
+  #nextFileChooserId = 1;
+  #nativeFileChooserDepth = 0;
+  #explicitFileChooserInterception?: boolean;
+  #fileChooserInterceptEnabled = false;
+  #fileChooserSession?: CdpSessionLike;
+
+  // Auth challenge management (Fetch.authRequired)
+  #authSession?: CDPSession;
+  #authFallbackSession?: CdpSessionLike;
+  #authFetchEnabled = false;
+  #authFetchSuppressedCount = 0;
+  #pendingAuthChallenges = new Map<string, PendingAuthEntry>();
+  #authHistory = new RingBuffer<AuthChallengeInfo>(MAX_AUTH_HISTORY);
+  #attemptedAuthRequestIds = new Set<string>();
+  #nextAuthId = 1;
+  #runtimeAuthDefaultAction?: AuthDefaultAction;
+  #runtimeAuthQueueTimeoutMs?: number;
+  #runtimeAuthRules: RuntimeAuthRule[] = [];
 
   // Screencast
   #screenRecorder: ScreenRecorderData | null = null;
@@ -230,10 +483,13 @@ export class McpPage implements ContextPage {
 
   #networkCollector?: NetworkCollector;
   #consoleCollector?: ConsoleCollector;
+  #realtimeNetworkCollector?: RealtimeNetworkCollector;
 
   #locatorClass: typeof Locator;
   #navigationTimeout: number;
   #config: ReadonlyServerConfig;
+  #monitorsManager?: NetworkMonitorsManager;
+  #monitorsUnsubscribe?: () => void;
   #commentBridge?: DevToolsCommentBridge;
   #networkOverrideManager?: NetworkOverrideManager;
 
@@ -245,16 +501,18 @@ export class McpPage implements ContextPage {
       locatorClass: typeof Locator;
       isolatedContextName?: string;
       navigationTimeout?: number;
+      monitorsManager?: NetworkMonitorsManager;
     },
   ) {
     this.#config = options.config;
     this.#locatorClass = options.locatorClass;
     this.#navigationTimeout = options.navigationTimeout ?? NAVIGATION_TIMEOUT;
+    this.#monitorsManager = options.monitorsManager;
     this.target = target;
     this.id = id;
     this.isolatedContextName = options.isolatedContextName;
     this.#dialogHandler = (dialog: Dialog): void => {
-      this.#dialog = dialog;
+      this.#handleIncomingDialog(dialog);
     };
   }
 
@@ -382,6 +640,7 @@ export class McpPage implements ContextPage {
         this.#config,
       );
       page.on('dialog', this.#dialogHandler);
+      page.on('framenavigated', this.#onFrameNavigatedSync);
       this.#networkCollector = new NetworkCollector(page, {
         maxNavigationSaved: this.#config.resolved.maxNavigationSaved,
       });
@@ -402,11 +661,206 @@ export class McpPage implements ContextPage {
         },
         {maxNavigationSaved: this.#config.resolved.maxNavigationSaved},
       );
+      this.#realtimeNetworkCollector = new RealtimeNetworkCollector(page, {
+        monitorsManager: this.#monitorsManager,
+        redactNetworkHeaders: () => this.#config.resolved.redactNetworkHeaders,
+      });
+    }
+    if (this.#monitorsManager && !this.#monitorsUnsubscribe) {
+      this.#monitorsUnsubscribe = this.#monitorsManager.onConfigChange(() => {
+        void this.syncFileChooserInterception();
+        void this.#syncAuthInterception();
+      });
     }
     this.updateTimeouts();
-    await this.#initDevToolsUniverseNoThrow();
+    await Promise.all([
+      this.#initDevToolsUniverseNoThrow(),
+      this.syncFileChooserInterception(),
+      this.#syncAuthInterception(),
+    ]);
     if (this.#disposed) {
       this.dispose();
+    }
+  }
+
+  #onFrameNavigatedSync = (): void => {
+    if (this.#shouldInterceptFileChooser()) {
+      this.#fileChooserInterceptEnabled = false;
+      void this.syncFileChooserInterception();
+    }
+    this.#syncAuthFallbackSession();
+  };
+
+  #shouldInterceptFileChooser(): boolean {
+    if (this.#disposed || this.#nativeFileChooserDepth > 0) {
+      return false;
+    }
+    if (this.#explicitFileChooserInterception !== undefined) {
+      return this.#explicitFileChooserInterception;
+    }
+    return Boolean(
+      this.#monitorsManager?.getConfig().interceptFileChooser ||
+      this.#config.resolved.interceptFileChooser,
+    );
+  }
+
+  async syncFileChooserInterception(): Promise<void> {
+    if (!this.#pptrPage || this.#disposed) {
+      return;
+    }
+    const desired = this.#shouldInterceptFileChooser();
+    if (!desired) {
+      if (this.#fileChooserInterceptEnabled) {
+        const session =
+          this.#fileChooserSession ?? getPageCdpSession(this.#pptrPage);
+        this.#fileChooserInterceptEnabled = false;
+        if (session) {
+          try {
+            await session.send('Page.setInterceptFileChooserDialog', {
+              enabled: false,
+            });
+          } catch (error) {
+            logger?.('Failed to disable file chooser interception', error);
+          }
+        }
+      }
+      return;
+    }
+    const session = getPageCdpSession(this.#pptrPage);
+    if (!session) {
+      return;
+    }
+    if (this.#fileChooserSession !== session) {
+      this.#fileChooserSession?.off(
+        'Page.fileChooserOpened',
+        this.#onFileChooserOpened,
+      );
+      this.#fileChooserSession = session;
+      session.on('Page.fileChooserOpened', this.#onFileChooserOpened);
+      this.#fileChooserInterceptEnabled = false;
+    }
+    if (this.#fileChooserInterceptEnabled) {
+      return;
+    }
+    try {
+      await session.send('Page.setInterceptFileChooserDialog', {enabled: true});
+      if (!this.#disposed && this.#shouldInterceptFileChooser()) {
+        this.#fileChooserInterceptEnabled = true;
+      }
+    } catch (error) {
+      logger?.('Failed to enable file chooser interception', error);
+    }
+  }
+
+  #desiredAuthFetchEnabled(): boolean {
+    if (
+      this.#disposed ||
+      this.#isRunningPerformanceTrace ||
+      this.#authFetchSuppressedCount > 0
+    ) {
+      return false;
+    }
+    return (
+      this.#runtimeAuthDefaultAction !== undefined ||
+      this.#runtimeAuthRules.length > 0 ||
+      this.#monitorsManager?.getConfig().autoAuthPolicy !== undefined
+    );
+  }
+
+  #syncAuthFallbackSession(): void {
+    if (
+      !this.#pptrPage ||
+      this.#disposed ||
+      this.#authSession ||
+      !this.#desiredAuthFetchEnabled()
+    ) {
+      return;
+    }
+    const session = getPageCdpSession(this.#pptrPage);
+    if (!session || session === this.#authFallbackSession) {
+      return;
+    }
+    this.#authFallbackSession?.off(
+      'Fetch.authRequired',
+      this.#onFallbackAuthRequired,
+    );
+    this.#authFallbackSession = session;
+    session.on('Fetch.authRequired', this.#onFallbackAuthRequired);
+  }
+
+  async #createAuthSessionNoThrow(): Promise<void> {
+    if (!this.#pptrPage || this.#disposed || this.#authSession) {
+      return;
+    }
+    try {
+      const session = await this.#pptrPage.createCDPSession();
+      if (this.#disposed) {
+        if (session && session !== this.#devtoolsUniverse?.session) {
+          void session.detach().catch(() => {});
+        }
+        return;
+      }
+      if (isCdpSessionLike(session)) {
+        this.#authSession = session;
+        session.on('Fetch.requestPaused', this.#onAuthSessionRequestPaused);
+        session.on('Fetch.authRequired', this.#onAuthSessionAuthRequired);
+      }
+    } catch (error) {
+      logger?.('Failed to initialize dedicated Fetch auth session', error);
+    }
+  }
+
+  async #syncAuthInterception(): Promise<void> {
+    if (!this.#pptrPage || this.#disposed) {
+      return;
+    }
+    if (!this.#desiredAuthFetchEnabled()) {
+      if (this.#authSession && this.#authFetchEnabled) {
+        await this.#setAuthFetchEnabled(false);
+      }
+      return;
+    }
+    if (!this.#authSession) {
+      await this.#createAuthSessionNoThrow();
+    }
+    if (!this.#desiredAuthFetchEnabled()) {
+      return;
+    }
+    if (this.#authSession) {
+      if (!this.#authFetchEnabled) {
+        await this.#setAuthFetchEnabled(true);
+      }
+    } else {
+      this.#syncAuthFallbackSession();
+    }
+  }
+
+  async #setAuthFetchEnabled(enabled: boolean): Promise<void> {
+    const session = this.#authSession;
+    if (!session || (enabled && this.#disposed)) {
+      return;
+    }
+    if (enabled === this.#authFetchEnabled) {
+      return;
+    }
+    try {
+      if (enabled) {
+        await session.send('Fetch.enable', {
+          handleAuthRequests: true,
+          patterns: AUTH_FETCH_PATTERNS,
+        });
+        if (!this.#disposed && this.#desiredAuthFetchEnabled()) {
+          this.#authFetchEnabled = true;
+        } else {
+          this.#authFetchEnabled = false;
+          await session.send('Fetch.disable').catch(() => {});
+        }
+      } else {
+        this.#authFetchEnabled = false;
+        await session.send('Fetch.disable');
+      }
+    } catch (error) {
+      logger?.(`Failed to ${enabled ? 'enable' : 'disable'} Fetch auth`, error);
     }
   }
 
@@ -599,15 +1053,674 @@ export class McpPage implements ContextPage {
     };
   }
 
-  getDialog(): Dialog | undefined {
-    if (this.#dialog?.handled) {
-      this.#dialog = undefined;
+  #pruneHandledDialogs(): boolean {
+    const before = this.#dialogs.length;
+    if (before === 0) {
+      return false;
     }
-    return this.#dialog;
+    this.#dialogs = this.#dialogs.filter(entry => !entry.dialog.handled);
+    return this.#dialogs.length !== before;
   }
 
-  clearDialog(): void {
-    this.#dialog = undefined;
+  #notifyDialogWaiters(
+    entry: InternalDialogEntry,
+    autoHandled: boolean,
+    autoAction?: DialogPolicyAction,
+  ): void {
+    for (const waiter of this.#dialogWaiters) {
+      if (waiter.type && waiter.type !== entry.type) {
+        continue;
+      }
+      if (waiter.messageRegex) {
+        waiter.messageRegex.lastIndex = 0;
+        if (!waiter.messageRegex.test(entry.message)) {
+          continue;
+        }
+      }
+      this.#dialogWaiters.delete(waiter);
+      waiter.resolve({
+        id: entry.id,
+        type: entry.type,
+        message: entry.message,
+        defaultValue: entry.defaultValue,
+        queueLength: this.#dialogs.length,
+        autoHandled,
+        autoAction,
+      });
+    }
+  }
+
+  #handleIncomingDialog(dialog: Dialog): void {
+    this.#pruneHandledDialogs();
+    const type = dialog.type();
+    const message = dialog.message();
+    const defaultValue = dialog.defaultValue?.() ?? '';
+    const entry: InternalDialogEntry = {
+      id: this.#nextDialogId++,
+      dialog,
+      type,
+      message,
+      defaultValue,
+      createdAt: Date.now(),
+    };
+
+    if (this.#explicitDialogActionDepth === 0 && this.#monitorsManager) {
+      const dialogType: DialogTypeName = isDialogTypeName(type)
+        ? type
+        : 'alert';
+      const decision = this.#monitorsManager.resolveDialogAction({
+        type: dialogType,
+        message,
+        url: this.url(),
+        defaultValue,
+      });
+      if (decision.action === 'accept') {
+        void Promise.resolve(
+          dialog.accept(
+            dialogType === 'prompt'
+              ? (decision.promptText ?? defaultValue)
+              : undefined,
+          ),
+        ).catch(error => {
+          logger?.('Failed auto-accepting dialog', error);
+        });
+        this.#notifyDialogWaiters(entry, true, 'accept');
+        return;
+      }
+      if (decision.action === 'dismiss') {
+        void Promise.resolve(dialog.dismiss()).catch(error => {
+          logger?.('Failed auto-dismissing dialog', error);
+        });
+        this.#notifyDialogWaiters(entry, true, 'dismiss');
+        return;
+      }
+    }
+
+    this.#dialogs.push(entry);
+    if (this.#dialogs.length > MAX_DIALOG_SLOTS) {
+      this.#dialogs.shift();
+    }
+    this.#notifyDialogWaiters(entry, false);
+  }
+
+  getDialog(): Dialog | undefined {
+    this.#pruneHandledDialogs();
+    return this.#dialogs[0]?.dialog;
+  }
+
+  getDialogs(): DialogQueueEntry[] {
+    this.#pruneHandledDialogs();
+    return this.#dialogs.map((entry, index) => ({
+      id: entry.id,
+      index,
+      dialog: entry.dialog,
+      type: entry.type,
+      message: entry.message,
+      defaultValue: entry.defaultValue,
+      createdAt: entry.createdAt,
+    }));
+  }
+
+  clearDialog(dialog?: Dialog): void {
+    const pruned = this.#pruneHandledDialogs();
+    if (dialog) {
+      this.#dialogs = this.#dialogs.filter(entry => entry.dialog !== dialog);
+      return;
+    }
+    if (!pruned && this.#dialogs.length > 0) {
+      this.#dialogs.shift();
+    }
+  }
+
+  async waitForDialog(
+    options: WaitForDialogOptions = {},
+  ): Promise<WaitForDialogResult> {
+    if (this.#disposed) {
+      throw new Error(`McpPage (id=${this.id}) has already been disposed.`);
+    }
+    this.#pruneHandledDialogs();
+    for (const entry of this.#dialogs) {
+      if (options.type && entry.type !== options.type) {
+        continue;
+      }
+      if (options.messageRegex) {
+        options.messageRegex.lastIndex = 0;
+        if (!options.messageRegex.test(entry.message)) {
+          continue;
+        }
+      }
+      return {
+        id: entry.id,
+        type: entry.type,
+        message: entry.message,
+        defaultValue: entry.defaultValue,
+        queueLength: this.#dialogs.length,
+        autoHandled: false,
+      };
+    }
+
+    const timeoutMs = options.timeoutMs ?? DEFAULT_DIALOG_WAIT_TIMEOUT_MS;
+    return await new Promise<WaitForDialogResult>((resolve, reject) => {
+      const waiter: DialogWaiter = {
+        type: options.type,
+        messageRegex: options.messageRegex,
+        resolve: res => {
+          clearTimeout(timer);
+          resolve(res);
+        },
+        reject: err => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      };
+      const timer = setTimeout(() => {
+        this.#dialogWaiters.delete(waiter);
+        reject(
+          new TimeoutError(
+            `Timed out after ${timeoutMs}ms waiting for dialog${options.type ? ` of type "${options.type}"` : ''}.`,
+          ),
+        );
+      }, timeoutMs);
+      timer.unref?.();
+      this.#dialogWaiters.add(waiter);
+    });
+  }
+
+  #onFileChooserOpened = (payload: unknown): void => {
+    if (this.#nativeFileChooserDepth > 0 || !isRecord(payload)) {
+      return;
+    }
+    const frameId = asString(payload['frameId']) ?? '';
+    const rawMode = asString(payload['mode']);
+    const mode: 'selectSingle' | 'selectMultiple' =
+      rawMode === 'selectMultiple' ? 'selectMultiple' : 'selectSingle';
+    const backendNodeId = asNumber(payload['backendNodeId']);
+    this.#pendingFileChoosers.push({
+      id: this.#nextFileChooserId++,
+      frameId,
+      mode,
+      backendNodeId,
+      createdAt: Date.now(),
+    });
+    if (this.#pendingFileChoosers.length > MAX_FILE_CHOOSER_SLOTS) {
+      this.#pendingFileChoosers.shift();
+    }
+  };
+
+  async withNativeFileChooser<T>(fn: () => Promise<T>): Promise<T> {
+    this.#nativeFileChooserDepth++;
+    this.#fileChooserInterceptEnabled = false;
+    try {
+      return await fn();
+    } finally {
+      this.#nativeFileChooserDepth--;
+      await this.syncFileChooserInterception();
+    }
+  }
+
+  getPendingFileChoosers(): PendingFileChooserInfo[] {
+    return this.#pendingFileChoosers.map(entry => ({...entry}));
+  }
+
+  async handleFileChooser(
+    options: HandleFileChooserOptions,
+  ): Promise<HandleFileChooserResult> {
+    if (options.action === 'enable') {
+      this.#explicitFileChooserInterception = true;
+      await this.syncFileChooserInterception();
+      return {
+        action: 'enable',
+        interceptionEnabled: this.#shouldInterceptFileChooser(),
+        pending: this.getPendingFileChoosers(),
+      };
+    }
+    if (options.action === 'disable') {
+      this.#explicitFileChooserInterception = false;
+      await this.syncFileChooserInterception();
+      return {
+        action: 'disable',
+        interceptionEnabled: this.#shouldInterceptFileChooser(),
+        pending: this.getPendingFileChoosers(),
+      };
+    }
+    if (options.action === 'list') {
+      if (
+        this.#explicitFileChooserInterception === undefined &&
+        !this.#shouldInterceptFileChooser()
+      ) {
+        this.#explicitFileChooserInterception = true;
+      }
+      await this.syncFileChooserInterception();
+      return {
+        action: 'list',
+        interceptionEnabled: this.#shouldInterceptFileChooser(),
+        pending: this.getPendingFileChoosers(),
+      };
+    }
+    const index = options.index ?? 0;
+    const entry = this.#pendingFileChoosers[index];
+    if (!entry) {
+      throw new Error(
+        this.#pendingFileChoosers.length === 0
+          ? 'No pending intercepted file chooser found.'
+          : `File chooser index ${index} out of range (0..${this.#pendingFileChoosers.length - 1}).`,
+      );
+    }
+
+    const session = this.#resolveSessionForFrameId(entry.frameId);
+    if (!session) {
+      throw new Error(
+        'No active CDP session available to handle file chooser.',
+      );
+    }
+
+    if (options.action === 'accept') {
+      const files = options.filePaths ?? [];
+      if (files.length === 0) {
+        throw new Error(
+          'filePaths must contain at least one path when action is "accept".',
+        );
+      }
+      if (entry.mode === 'selectSingle' && files.length > 1) {
+        throw new Error(
+          'This file chooser only accepts a single file (mode=selectSingle).',
+        );
+      }
+      if (entry.backendNodeId === undefined) {
+        throw new Error(
+          'Intercepted file chooser has no backendNodeId (likely triggered outside an <input type="file"> element).',
+        );
+      }
+      await session.send('DOM.setFileInputFiles', {
+        files,
+        backendNodeId: entry.backendNodeId,
+      });
+      this.#pendingFileChoosers.splice(index, 1);
+      return {
+        action: 'accept',
+        handled: entry,
+        pending: this.getPendingFileChoosers(),
+      };
+    }
+
+    // Best-effort cancel event dispatch for <input type="file">.
+    if (entry.backendNodeId !== undefined) {
+      try {
+        const resolved = await session.send('DOM.resolveNode', {
+          backendNodeId: entry.backendNodeId,
+        });
+        if (isRecord(resolved) && isRecord(resolved['object'])) {
+          const objectId = asString(resolved['object']['objectId']);
+          if (objectId) {
+            await session.send('Runtime.callFunctionOn', {
+              objectId,
+              functionDeclaration:
+                'function() { this.dispatchEvent(new Event("cancel", { bubbles: true })); }',
+            });
+          }
+        }
+      } catch (error) {
+        logger?.('Failed dispatching cancel event for file chooser', error);
+      }
+    }
+    this.#pendingFileChoosers.splice(index, 1);
+    return {
+      action: 'cancel',
+      handled: entry,
+      pending: this.getPendingFileChoosers(),
+    };
+  }
+
+  #resolveSessionForFrameId(frameId: string): CdpSessionLike | undefined {
+    if (this.#pptrPage && frameId) {
+      for (const frame of this.#pptrPage.frames?.() ?? []) {
+        if (getFrameId(frame) === frameId) {
+          const frameSession = getFrameCdpSession(frame);
+          if (frameSession) {
+            return frameSession;
+          }
+        }
+      }
+    }
+    return this.#pptrPage ? getPageCdpSession(this.#pptrPage) : undefined;
+  }
+
+  #onAuthSessionRequestPaused = (payload: unknown): void => {
+    const session = this.#authSession;
+    if (!session || !isRecord(payload)) {
+      return;
+    }
+    const requestId = asString(payload['requestId']);
+    if (!requestId) {
+      return;
+    }
+    void session.send('Fetch.continueRequest', {requestId}).catch(error => {
+      logger?.('Ignoring Fetch.continueRequest error', error);
+    });
+  };
+
+  #onAuthSessionAuthRequired = (payload: unknown): void => {
+    if (this.#authSession && isCdpSessionLike(this.#authSession)) {
+      this.#handleAuthRequiredEvent(this.#authSession, payload);
+    }
+  };
+
+  #onFallbackAuthRequired = (payload: unknown): void => {
+    if (this.#authFallbackSession) {
+      this.#handleAuthRequiredEvent(this.#authFallbackSession, payload);
+    }
+  };
+
+  #resolveRuntimeOrConfigAuthAction(info: {
+    url: string;
+    origin: string;
+    realm: string;
+    source: string;
+  }): {
+    action: AuthPolicyAction;
+    username?: string;
+    password?: string;
+    queueTimeoutMs: number;
+  } {
+    for (let i = this.#runtimeAuthRules.length - 1; i >= 0; i--) {
+      const rule = this.#runtimeAuthRules[i];
+      if (rule.source && rule.source !== info.source) {
+        continue;
+      }
+      if (rule.originRegex) {
+        rule.originRegex.lastIndex = 0;
+        if (!rule.originRegex.test(info.origin)) {
+          continue;
+        }
+      }
+      if (rule.urlRegex) {
+        rule.urlRegex.lastIndex = 0;
+        if (!rule.urlRegex.test(info.url)) {
+          continue;
+        }
+      }
+      if (rule.realmRegex) {
+        rule.realmRegex.lastIndex = 0;
+        if (!rule.realmRegex.test(info.realm)) {
+          continue;
+        }
+      }
+      return {
+        action: rule.action,
+        username: rule.username,
+        password: rule.password,
+        queueTimeoutMs: this.#runtimeAuthQueueTimeoutMs ?? 15_000,
+      };
+    }
+
+    const fromMonitors = this.#monitorsManager?.resolveAuthAction(info);
+    if (this.#runtimeAuthDefaultAction) {
+      if (fromMonitors && fromMonitors.action === 'provide') {
+        return fromMonitors;
+      }
+      return {
+        action: this.#runtimeAuthDefaultAction,
+        queueTimeoutMs:
+          this.#runtimeAuthQueueTimeoutMs ??
+          fromMonitors?.queueTimeoutMs ??
+          15_000,
+      };
+    }
+    if (fromMonitors) {
+      return fromMonitors;
+    }
+    return {
+      action: 'default',
+      queueTimeoutMs: this.#runtimeAuthQueueTimeoutMs ?? 15_000,
+    };
+  }
+
+  #handleAuthRequiredEvent(session: CdpSessionLike, payload: unknown): void {
+    if (!isRecord(payload)) {
+      return;
+    }
+    const requestId = asString(payload['requestId']);
+    if (!requestId) {
+      return;
+    }
+    const request = isRecord(payload['request']) ? payload['request'] : {};
+    const authChallenge = isRecord(payload['authChallenge'])
+      ? payload['authChallenge']
+      : {};
+    const url = asString(request['url']) ?? '';
+    const method = asString(request['method']) ?? 'GET';
+    const resourceType = asString(payload['resourceType']) ?? 'Other';
+    const frameId = asString(payload['frameId']) ?? '';
+    const source = asString(authChallenge['source']) ?? 'Server';
+    const origin = asString(authChallenge['origin']) ?? '';
+    const scheme = asString(authChallenge['scheme']) ?? '';
+    const realm = asString(authChallenge['realm']) ?? '';
+
+    this.#realtimeNetworkCollector?.recordAuthChallengeAlert({
+      requestId,
+      url,
+      method,
+      resourceType,
+      source,
+      realm,
+    });
+
+    const challengeId = `auth-${this.#nextAuthId++}`;
+    const info: AuthChallengeInfo = {
+      challengeId,
+      requestId,
+      url,
+      method,
+      resourceType,
+      frameId,
+      source,
+      origin,
+      scheme,
+      realm,
+      createdAt: Date.now(),
+      status: 'pending',
+    };
+
+    if (this.#attemptedAuthRequestIds.has(requestId)) {
+      this.#respondAuthChallenge(session, info, 'CancelAuth');
+      return;
+    }
+
+    const decision = this.#resolveRuntimeOrConfigAuthAction({
+      url,
+      origin,
+      realm,
+      source,
+    });
+    if (
+      decision.action === 'provide' &&
+      decision.username !== undefined &&
+      decision.password !== undefined
+    ) {
+      this.#markAttemptedAuthRequest(requestId);
+      this.#respondAuthChallenge(session, info, 'ProvideCredentials', {
+        username: decision.username,
+        password: decision.password,
+      });
+      return;
+    }
+    if (decision.action === 'default') {
+      this.#respondAuthChallenge(session, info, 'Default');
+      return;
+    }
+    if (decision.action === 'cancel') {
+      this.#respondAuthChallenge(session, info, 'CancelAuth');
+      return;
+    }
+
+    // Queue with bounded safety timeout so headless Chrome never stalls indefinitely.
+    const entry: PendingAuthEntry = {
+      info,
+      session,
+    };
+    entry.timer = setTimeout(() => {
+      if (!this.#pendingAuthChallenges.has(challengeId)) {
+        return;
+      }
+      this.#pendingAuthChallenges.delete(challengeId);
+      this.#respondAuthChallenge(session, info, 'CancelAuth');
+    }, decision.queueTimeoutMs);
+    entry.timer.unref?.();
+    this.#pendingAuthChallenges.set(challengeId, entry);
+  }
+
+  #markAttemptedAuthRequest(requestId: string): void {
+    if (this.#attemptedAuthRequestIds.has(requestId)) {
+      this.#attemptedAuthRequestIds.delete(requestId);
+    } else {
+      while (this.#attemptedAuthRequestIds.size >= MAX_ATTEMPTED_AUTH_IDS) {
+        const oldest = this.#attemptedAuthRequestIds.values().next().value;
+        if (oldest === undefined) {
+          break;
+        }
+        this.#attemptedAuthRequestIds.delete(oldest);
+      }
+    }
+    this.#attemptedAuthRequestIds.add(requestId);
+  }
+
+  #respondAuthChallenge(
+    session: CdpSessionLike,
+    info: AuthChallengeInfo,
+    responseType: 'ProvideCredentials' | 'CancelAuth' | 'Default',
+    credentials?: {username: string; password: string},
+  ): void {
+    info.resolvedAt = Date.now();
+    info.status =
+      responseType === 'ProvideCredentials'
+        ? 'provided'
+        : responseType === 'CancelAuth'
+          ? 'canceled'
+          : 'default';
+    this.#authHistory.push({...info}, info.resolvedAt);
+
+    const authChallengeResponse: Record<string, unknown> = {
+      response: responseType,
+      ...(responseType === 'ProvideCredentials' && credentials
+        ? {
+            username: credentials.username,
+            password: credentials.password,
+          }
+        : {}),
+    };
+    void session
+      .send('Fetch.continueWithAuth', {
+        requestId: info.requestId,
+        authChallengeResponse,
+      })
+      .catch(error => {
+        logger?.('Failed to send Fetch.continueWithAuth', error);
+      });
+  }
+
+  getPendingAuthChallenges(): AuthChallengeInfo[] {
+    return Array.from(this.#pendingAuthChallenges.values()).map(entry => ({
+      ...entry.info,
+    }));
+  }
+
+  getAuthChallengeHistory(limit = 50): AuthChallengeInfo[] {
+    return this.#authHistory.query({limit}).entries.map(e => e.data);
+  }
+
+  async handleAuthChallenge(
+    options: HandleAuthChallengeOptions,
+  ): Promise<HandleAuthChallengeResult> {
+    const effectiveDefault: AuthDefaultAction =
+      this.#runtimeAuthDefaultAction ??
+      this.#monitorsManager?.getConfig().autoAuthPolicy?.defaultAction ??
+      'default';
+
+    if (options.action === 'list') {
+      return {
+        action: 'list',
+        pending: this.getPendingAuthChallenges(),
+        history: this.getAuthChallengeHistory(),
+        defaultAction: effectiveDefault,
+      };
+    }
+
+    if (options.action === 'set_policy') {
+      if (options.defaultAction !== undefined) {
+        this.#runtimeAuthDefaultAction = options.defaultAction;
+      }
+      if (options.queueTimeoutMs !== undefined) {
+        this.#runtimeAuthQueueTimeoutMs = options.queueTimeoutMs;
+      }
+      if (options.username !== undefined && options.password !== undefined) {
+        this.#runtimeAuthRules.push({
+          originRegex: options.originRegex,
+          urlRegex: options.urlRegex,
+          realmRegex: options.realmRegex,
+          source: options.source,
+          action: 'provide',
+          username: options.username,
+          password: options.password,
+        });
+      }
+      await this.#syncAuthInterception();
+      return {
+        action: 'set_policy',
+        pending: this.getPendingAuthChallenges(),
+        history: this.getAuthChallengeHistory(),
+        defaultAction: this.#runtimeAuthDefaultAction ?? effectiveDefault,
+      };
+    }
+
+    let entry: PendingAuthEntry | undefined;
+    if (options.challengeId) {
+      entry = this.#pendingAuthChallenges.get(options.challengeId);
+      if (!entry) {
+        throw new Error(
+          `Pending auth challenge "${options.challengeId}" not found.`,
+        );
+      }
+    } else {
+      entry = this.#pendingAuthChallenges.values().next().value;
+      if (!entry) {
+        throw new Error('No pending auth challenge found.');
+      }
+    }
+
+    if (entry.timer !== undefined) {
+      clearTimeout(entry.timer);
+    }
+    this.#pendingAuthChallenges.delete(entry.info.challengeId);
+
+    if (options.action === 'provide') {
+      if (options.username === undefined || options.password === undefined) {
+        throw new Error(
+          'username and password are required when action is "provide".',
+        );
+      }
+      this.#markAttemptedAuthRequest(entry.info.requestId);
+      this.#respondAuthChallenge(
+        entry.session,
+        entry.info,
+        'ProvideCredentials',
+        {
+          username: options.username,
+          password: options.password,
+        },
+      );
+    } else if (options.action === 'default') {
+      this.#respondAuthChallenge(entry.session, entry.info, 'Default');
+    } else {
+      this.#respondAuthChallenge(entry.session, entry.info, 'CancelAuth');
+    }
+
+    return {
+      action: options.action,
+      resolved: {...entry.info},
+      pending: this.getPendingAuthChallenges(),
+      history: this.getAuthChallengeHistory(),
+      defaultAction: effectiveDefault,
+    };
   }
 
   getScreenRecorder(): ScreenRecorderData | null {
@@ -624,6 +1737,7 @@ export class McpPage implements ContextPage {
 
   setIsRunningPerformanceTrace(x: boolean): void {
     this.#isRunningPerformanceTrace = x;
+    void this.#syncAuthInterception();
   }
 
   throwIfDialogOpen(): void {
@@ -918,7 +2032,7 @@ export class McpPage implements ContextPage {
     return new WaitForHelper(this.pptrPage, cpuMultiplier, networkMultiplier);
   }
 
-  waitForEventsAfterAction(
+  async waitForEventsAfterAction(
     action: (signal: AbortSignal) => Promise<unknown>,
     options?: {
       timeout?: number;
@@ -932,12 +2046,24 @@ export class McpPage implements ContextPage {
       this.cpuThrottlingRate,
       getNetworkMultiplierFromString(this.networkConditions),
     );
-    return helper.waitForEventsAfterAction(action, options);
+    const hasExplicitDialogHandler = options?.handleDialog !== undefined;
+    if (hasExplicitDialogHandler) {
+      this.#explicitDialogActionDepth++;
+    }
+    try {
+      return await helper.waitForEventsAfterAction(action, options);
+    } finally {
+      if (hasExplicitDialogHandler) {
+        this.#explicitDialogActionDepth--;
+      }
+    }
   }
 
   dispose(): void {
     this.#disposed = true;
     this.#isRunningPerformanceTrace = false;
+    this.#monitorsUnsubscribe?.();
+    this.#monitorsUnsubscribe = undefined;
     this.disposeCommentBridge();
     if (this.#screenRecorder) {
       const {recorder} = this.#screenRecorder;
@@ -947,6 +2073,44 @@ export class McpPage implements ContextPage {
       });
     }
     this.#pptrPage?.off('dialog', this.#dialogHandler);
+    this.#pptrPage?.off('framenavigated', this.#onFrameNavigatedSync);
+    if (
+      this.#fileChooserInterceptEnabled &&
+      this.#fileChooserSession &&
+      !this.isClosed()
+    ) {
+      void this.#fileChooserSession
+        .send('Page.setInterceptFileChooserDialog', {enabled: false})
+        .catch(() => {});
+    }
+    this.#fileChooserInterceptEnabled = false;
+    this.#pendingFileChoosers = [];
+    this.#fileChooserSession?.off(
+      'Page.fileChooserOpened',
+      this.#onFileChooserOpened,
+    );
+    this.#fileChooserSession = undefined;
+    this.#authFallbackSession?.off(
+      'Fetch.authRequired',
+      this.#onFallbackAuthRequired,
+    );
+    this.#authFallbackSession = undefined;
+    for (const waiter of this.#dialogWaiters) {
+      waiter.reject(
+        new Error(`McpPage (id=${this.id}) disposed while waiting for dialog.`),
+      );
+    }
+    this.#dialogWaiters.clear();
+    for (const entry of this.#pendingAuthChallenges.values()) {
+      if (entry.timer !== undefined) {
+        clearTimeout(entry.timer);
+      }
+      this.#respondAuthChallenge(entry.session, entry.info, 'CancelAuth');
+    }
+    this.#pendingAuthChallenges.clear();
+    this.#attemptedAuthRequestIds.clear();
+    this.#realtimeNetworkCollector?.dispose();
+    this.#realtimeNetworkCollector = undefined;
     void this.#networkOverrideManager?.dispose();
     this.#networkCollector?.dispose();
     this.#consoleCollector?.dispose();
@@ -959,6 +2123,18 @@ export class McpPage implements ContextPage {
     void devtoolsUniverse?.session.detach().catch(e => {
       logger?.('Failed to detach DevTools session', e);
     });
+    const authSession = this.#authSession;
+    this.#authSession = undefined;
+    this.#authFetchEnabled = false;
+    if (authSession) {
+      authSession.off('Fetch.requestPaused', this.#onAuthSessionRequestPaused);
+      authSession.off('Fetch.authRequired', this.#onAuthSessionAuthRequired);
+      if (authSession !== devtoolsUniverse?.session) {
+        void authSession.detach().catch(e => {
+          logger?.('Failed to detach Fetch auth session', e);
+        });
+      }
+    }
   }
 
   async mockNetwork(input: NetworkMockInput): Promise<NetworkOverride> {
@@ -1701,16 +2877,405 @@ export class McpPage implements ContextPage {
     });
   }
 
-  lighthouseNavigation(flags?: Flags): Promise<RunnerResult | undefined> {
-    return lighthouseNavigation(this.pptrPage, this.pptrPage.url(), {
-      flags,
-    });
+  get realtimeNetworkCollector(): RealtimeNetworkCollector {
+    if (!this.#realtimeNetworkCollector) {
+      throw new Error(
+        `McpPage (id=${this.id}) is not initialized. Call init() first.`,
+      );
+    }
+    return this.#realtimeNetworkCollector;
   }
 
-  lighthouseSnapshot(flags?: Flags): Promise<RunnerResult | undefined> {
-    return lighthouseSnapshot(this.pptrPage, {
-      flags,
-    });
+  listWebSocketConnections(
+    options: {status?: WebSocketStatus; urlPattern?: string} = {},
+  ): WebSocketConnectionInfo[] {
+    return this.realtimeNetworkCollector.listWebSocketConnections(options);
+  }
+
+  pollWsFrames(
+    options: {
+      requestId?: string;
+      urlPattern?: string;
+      direction?: 'sent' | 'received' | 'error' | 'all';
+      sinceSeq?: number;
+      unreadOnly?: boolean;
+      limit?: number;
+    } = {},
+  ): RingBufferQueryResult<WsFrameData> {
+    return this.realtimeNetworkCollector.pollWsFrames(options);
+  }
+
+  pollSseEvents(
+    options: {
+      requestId?: string;
+      urlPattern?: string;
+      eventName?: string;
+      sinceSeq?: number;
+      unreadOnly?: boolean;
+      limit?: number;
+    } = {},
+  ): RingBufferQueryResult<SseEventData> {
+    return this.realtimeNetworkCollector.pollSseEvents(options);
+  }
+
+  pollNetworkAlerts(
+    options: {
+      kinds?: NetworkAlertKind[];
+      categories?: NetworkAlertCategory[];
+      urlPattern?: string;
+      includeCanceled?: boolean;
+      sinceSeq?: number;
+      unreadOnly?: boolean;
+      limit?: number;
+    } = {},
+  ): RingBufferQueryResult<NetworkAlertData> {
+    return this.realtimeNetworkCollector.pollNetworkAlerts(options);
+  }
+
+  waitForNetworkResponse(
+    options: WaitForNetworkResponseOptions,
+  ): Promise<WaitForNetworkResponseResult> {
+    return this.realtimeNetworkCollector.waitForNetworkResponse(options);
+  }
+
+  async waitForDom(options: WaitForDomOptions): Promise<WaitForDomResult> {
+    const rawSegments = options.selector.split('>>>');
+    const segments: string[] = [];
+    for (const part of rawSegments) {
+      const trimmed = part.trim();
+      if (!trimmed) {
+        throw new Error(
+          `Invalid selector "${options.selector}": empty segment around >>> Shadow DOM combinator.`,
+        );
+      }
+      segments.push(trimmed);
+    }
+
+    const state: WaitForDomState = options.state ?? 'visible';
+    const timeoutMs = options.timeoutMs ?? DEFAULT_DOM_WAIT_TIMEOUT_MS;
+    const pollIntervalMs =
+      options.pollIntervalMs ?? DEFAULT_DOM_POLL_INTERVAL_MS;
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+
+    let lastCount = 0;
+    let lastVisibleCount = 0;
+    let lastErrorMessage: string | undefined;
+
+    while (true) {
+      if (this.#disposed || this.isClosed()) {
+        throw new Error(`Page ${this.id} closed while waiting for DOM.`);
+      }
+
+      const page = this.pptrPage;
+      let targetFrame: Frame | undefined;
+      if (options.frameId) {
+        for (const candidate of page.frames()) {
+          if (getFrameId(candidate) === options.frameId) {
+            targetFrame = candidate;
+            break;
+          }
+        }
+        if (!targetFrame) {
+          const graceDeadline = Math.min(deadline, startedAt + 1_500);
+          if (Date.now() < graceDeadline) {
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+            continue;
+          }
+          const available = page
+            .frames()
+            .map(f => `${getFrameId(f) ?? 'unknown'}(${f.url()})`)
+            .join(', ');
+          throw new Error(
+            `Frame "${options.frameId}" was detached or not found on target ${this.targetId}. Available frames: ${available || '(none)'}.`,
+          );
+        }
+      } else {
+        targetFrame = page.mainFrame();
+      }
+
+      try {
+        const probe = await targetFrame.evaluate(
+          (params: {
+            segments: string[];
+            state: WaitForDomState;
+            text?: string;
+            textRegexSource?: string;
+            textRegexFlags?: string;
+            attributeName?: string;
+            attributeValue?: string;
+          }) => {
+            const queryShadowAll = (
+              rootDoc: Document,
+              segs: string[],
+            ): Element[] => {
+              let roots: Array<Document | ShadowRoot> = [rootDoc];
+              let matches: Element[] = [];
+              for (let i = 0; i < segs.length; i++) {
+                const seg = segs[i];
+                const nextMatches: Element[] = [];
+                for (const root of roots) {
+                  const found = root.querySelectorAll(seg);
+                  for (const el of found) {
+                    nextMatches.push(el);
+                  }
+                }
+                if (i < segs.length - 1) {
+                  const nextRoots: ShadowRoot[] = [];
+                  for (const el of nextMatches) {
+                    if (el.shadowRoot) {
+                      nextRoots.push(el.shadowRoot);
+                    }
+                  }
+                  if (nextRoots.length === 0) {
+                    return [];
+                  }
+                  roots = nextRoots;
+                } else {
+                  matches = nextMatches;
+                }
+              }
+              return matches;
+            };
+
+            const isElementVisible = (el: Element): boolean => {
+              if (!el.isConnected) {
+                return false;
+              }
+              const style = window.getComputedStyle(el);
+              if (
+                style.display === 'none' ||
+                style.visibility === 'hidden' ||
+                parseFloat(style.opacity) === 0
+              ) {
+                return false;
+              }
+              const rect = el.getBoundingClientRect();
+              return (
+                rect.width > 0 ||
+                rect.height > 0 ||
+                el.getClientRects().length > 0
+              );
+            };
+
+            let rawElements: Element[];
+            try {
+              rawElements = queryShadowAll(document, params.segments);
+            } catch (err) {
+              return {
+                ok: false,
+                count: 0,
+                visibleCount: 0,
+                syntaxError: err instanceof Error ? err.message : String(err),
+              };
+            }
+
+            const textRegex =
+              params.textRegexSource !== undefined
+                ? new RegExp(params.textRegexSource, params.textRegexFlags)
+                : undefined;
+
+            const matched: Element[] = [];
+            for (const el of rawElements) {
+              if (params.attributeName !== undefined) {
+                if (!el.hasAttribute(params.attributeName)) {
+                  continue;
+                }
+                if (
+                  params.attributeValue !== undefined &&
+                  el.getAttribute(params.attributeName) !==
+                    params.attributeValue
+                ) {
+                  continue;
+                }
+              }
+              if (params.text !== undefined || textRegex !== undefined) {
+                const rawText = el.textContent ?? '';
+                const inner =
+                  el instanceof HTMLElement ? (el.innerText ?? '') : '';
+                if (
+                  params.text !== undefined &&
+                  !rawText.includes(params.text) &&
+                  !inner.includes(params.text)
+                ) {
+                  continue;
+                }
+                if (textRegex !== undefined) {
+                  textRegex.lastIndex = 0;
+                  const matchedText = textRegex.test(rawText);
+                  textRegex.lastIndex = 0;
+                  const matchedInner = textRegex.test(inner);
+                  if (!matchedText && !matchedInner) {
+                    continue;
+                  }
+                }
+              }
+              matched.push(el);
+            }
+
+            let visibleCount = 0;
+            let firstVisible: Element | undefined;
+            for (const el of matched) {
+              if (isElementVisible(el)) {
+                visibleCount++;
+                firstVisible ??= el;
+              }
+            }
+
+            let ok = false;
+            if (params.state === 'attached') {
+              ok = matched.length > 0;
+            } else if (params.state === 'visible') {
+              ok = visibleCount > 0;
+            } else if (params.state === 'detached') {
+              ok = matched.length === 0;
+            } else if (params.state === 'hidden') {
+              ok = visibleCount === 0;
+            }
+
+            const sample = firstVisible ?? matched[0];
+            const sampleText = sample?.textContent?.trim();
+            return {
+              ok,
+              count: matched.length,
+              visibleCount,
+              tagName: sample?.tagName.toLowerCase(),
+              textPreview: sampleText ? sampleText.slice(0, 120) : undefined,
+            };
+          },
+          {
+            segments,
+            state,
+            text: options.text,
+            textRegexSource: options.textRegex?.source,
+            textRegexFlags: options.textRegex?.flags,
+            attributeName: options.attributeName,
+            attributeValue: options.attributeValue,
+          },
+        );
+
+        if (probe.syntaxError) {
+          throw new Error(
+            `Invalid selector "${options.selector}": ${probe.syntaxError}`,
+          );
+        }
+        lastCount = probe.count;
+        lastVisibleCount = probe.visibleCount;
+        lastErrorMessage = undefined;
+        if (probe.ok) {
+          return {
+            matched: true,
+            selector: options.selector,
+            state,
+            frameId: getFrameId(targetFrame) ?? options.frameId ?? 'main',
+            count: probe.count,
+            visibleCount: probe.visibleCount,
+            tagName: probe.tagName,
+            textPreview: probe.textPreview,
+            elapsedMs: Date.now() - startedAt,
+          };
+        }
+      } catch (error) {
+        if (
+          isDetachedNavigationError(error) &&
+          !this.#disposed &&
+          !this.isClosed() &&
+          Date.now() < deadline
+        ) {
+          this.textSnapshot = null;
+          this.uniqueBackendNodeIdToMcpId.clear();
+          lastErrorMessage = getErrorMessage(error);
+          await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+          continue;
+        }
+        throw error;
+      }
+
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          `Timed out after ${timeoutMs}ms waiting for selector "${options.selector}" to become ${state}` +
+            `${options.frameId ? ` in frame ${options.frameId}` : ''}` +
+            ` (last count=${lastCount}, visibleCount=${lastVisibleCount}` +
+            `${lastErrorMessage ? `, lastError=${lastErrorMessage}` : ''}).`,
+        );
+      }
+      const remaining = deadline - Date.now();
+      await new Promise(resolve =>
+        setTimeout(resolve, Math.min(pollIntervalMs, Math.max(10, remaining))),
+      );
+    }
+  }
+
+  async recoverDetachedFrame(
+    _error?: unknown,
+  ): Promise<DetachedFrameRecoveryResult> {
+    this.textSnapshot = null;
+    this.uniqueBackendNodeIdToMcpId.clear();
+    const targetId = this.targetId;
+    if (this.#disposed || this.isClosed()) {
+      return {recovered: false, targetId};
+    }
+    const previousPage = this.#pptrPage;
+    if (previousPage?.browser()?.connected === false) {
+      return {recovered: false, targetId};
+    }
+
+    let activePage = previousPage;
+    try {
+      const targetPage = await this.target.page();
+      if (targetPage && !targetPage.isClosed()) {
+        activePage = targetPage;
+      }
+    } catch {
+      // Keep previousPage if target.page() is unavailable.
+    }
+    if (!activePage || activePage.isClosed()) {
+      return {recovered: false, targetId};
+    }
+
+    const mainFrame = activePage.mainFrame();
+    if (!mainFrame || mainFrame.detached) {
+      return {recovered: false, targetId};
+    }
+
+    this.#realtimeNetworkCollector?.syncCdpSession();
+    if (this.#shouldInterceptFileChooser()) {
+      this.#fileChooserInterceptEnabled = false;
+      void this.syncFileChooserInterception();
+    }
+    return {
+      recovered: true,
+      targetId,
+      frameId: getFrameId(mainFrame),
+      url: activePage.url(),
+      pageSwapped: previousPage !== undefined && activePage !== previousPage,
+    };
+  }
+
+  async lighthouseNavigation(flags?: Flags): Promise<RunnerResult | undefined> {
+    this.#authFetchSuppressedCount++;
+    await this.#syncAuthInterception();
+    try {
+      return await lighthouseNavigation(this.pptrPage, this.pptrPage.url(), {
+        flags,
+      });
+    } finally {
+      this.#authFetchSuppressedCount--;
+      await this.#syncAuthInterception();
+    }
+  }
+
+  async lighthouseSnapshot(flags?: Flags): Promise<RunnerResult | undefined> {
+    this.#authFetchSuppressedCount++;
+    await this.#syncAuthInterception();
+    try {
+      return await lighthouseSnapshot(this.pptrPage, {
+        flags,
+      });
+    } finally {
+      this.#authFetchSuppressedCount--;
+      await this.#syncAuthInterception();
+    }
   }
 
   /**

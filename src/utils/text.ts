@@ -64,7 +64,7 @@ export function truncateUrl(url: string): string {
 
 export const DEFAULT_RESPONSE_MAX_BYTES = 8800;
 
-function sliceUtf8Head(buf: Buffer, maxBytes: number): string {
+export function sliceUtf8Head(buf: Buffer, maxBytes: number): string {
   if (maxBytes <= 0) {
     return '';
   }
@@ -73,6 +73,27 @@ function sliceUtf8Head(buf: Buffer, maxBytes: number): string {
     end--;
   }
   return buf.subarray(0, end).toString('utf8');
+}
+
+/**
+ * Truncates `text` so its UTF-8 byte length does not exceed `maxBytes`,
+ * backing off to a UTF-8 character boundary to avoid broken multi-byte sequences.
+ */
+export function truncateUtf8Bytes(
+  text: string,
+  maxBytes: number,
+): {value: string; truncated: boolean} {
+  if (maxBytes <= 0) {
+    return {value: '', truncated: text.length > 0};
+  }
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= maxBytes) {
+    return {value: text, truncated: false};
+  }
+  return {
+    value: sliceUtf8Head(buf, maxBytes),
+    truncated: true,
+  };
 }
 
 function sliceUtf8Tail(buf: Buffer, maxBytes: number): string {

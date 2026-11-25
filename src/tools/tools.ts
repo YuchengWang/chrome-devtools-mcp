@@ -13,6 +13,7 @@ import * as commentsTools from './comments.js';
 import * as consoleTools from './console.js';
 import * as cssTools from './css.js';
 import * as diagnoseTools from './diagnose.js';
+import * as downloadTools from './downloads.js';
 import * as emulationTools from './emulation.js';
 import * as extensionTools from './extensions.js';
 import * as inputTools from './input.js';
@@ -23,6 +24,7 @@ import * as networkTools from './network.js';
 import * as pagesTools from './pages.js';
 import * as performanceTools from './performance.js';
 import * as pwaTools from './pwa.js';
+import * as realtimeNetworkTools from './realtimeNetwork.js';
 import * as screencastTools from './screencast.js';
 import * as screenshotTools from './screenshot.js';
 import * as scriptTools from './script.js';
@@ -41,6 +43,7 @@ export const createTools = (args: ParsedArguments): AnyToolDefinition[] => {
     ...Object.values(consoleTools),
     ...Object.values(cssTools),
     ...Object.values(diagnoseTools),
+    ...Object.values(downloadTools),
     ...Object.values(emulationTools),
     ...Object.values(extensionTools),
     ...Object.values(inputTools),
@@ -51,6 +54,7 @@ export const createTools = (args: ParsedArguments): AnyToolDefinition[] => {
     ...Object.values(pagesTools),
     ...Object.values(performanceTools),
     ...Object.values(pwaTools),
+    ...Object.values(realtimeNetworkTools),
     ...Object.values(screencastTools),
     ...Object.values(screenshotTools),
     ...Object.values(scriptTools),

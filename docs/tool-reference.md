@@ -2,19 +2,21 @@
 
 # Chrome DevTools MCP Tool Reference
 
-- **[Input automation](#input-automation)** (11 tools)
+- **[Input automation](#input-automation)** (13 tools)
   - [`batch_actions`](#batch_actions)
   - [`click`](#click)
   - [`drag`](#drag)
   - [`fill`](#fill)
   - [`fill_form`](#fill_form)
   - [`handle_dialog`](#handle_dialog)
+  - [`handle_file_chooser`](#handle_file_chooser)
   - [`hover`](#hover)
   - [`press_key`](#press_key)
   - [`type_text`](#type_text)
   - [`upload_file`](#upload_file)
+  - [`wait_for_dialog`](#wait_for_dialog)
   - [`click_at`](#click_at)
-- **[Navigation automation](#navigation-automation)** (7 tools)
+- **[Navigation automation](#navigation-automation)** (8 tools)
   - [`close_page`](#close_page)
   - [`connect_browser`](#connect_browser)
   - [`list_pages`](#list_pages)
@@ -22,6 +24,7 @@
   - [`new_page`](#new_page)
   - [`select_page`](#select_page)
   - [`wait_for`](#wait_for)
+  - [`wait_for_dom`](#wait_for_dom)
 - **[Emulation](#emulation)** (2 tools)
   - [`emulate`](#emulate)
   - [`resize_page`](#resize_page)
@@ -29,9 +32,18 @@
   - [`performance_analyze_insight`](#performance_analyze_insight)
   - [`performance_start_trace`](#performance_start_trace)
   - [`performance_stop_trace`](#performance_stop_trace)
-- **[Network](#network)** (2 tools)
+- **[Network](#network)** (11 tools)
   - [`get_network_request`](#get_network_request)
+  - [`handle_auth_challenge`](#handle_auth_challenge)
+  - [`list_downloads`](#list_downloads)
   - [`list_network_requests`](#list_network_requests)
+  - [`list_websocket_connections`](#list_websocket_connections)
+  - [`poll_monitor_events`](#poll_monitor_events)
+  - [`poll_network_alerts`](#poll_network_alerts)
+  - [`poll_sse_events`](#poll_sse_events)
+  - [`poll_ws_frames`](#poll_ws_frames)
+  - [`wait_for_download`](#wait_for_download)
+  - [`wait_for_network_response`](#wait_for_network_response)
 - **[Debugging](#debugging)** (11 tools)
   - [`diagnose_page_load`](#diagnose_page_load)
   - [`evaluate_script`](#evaluate_script)
@@ -151,13 +163,29 @@
 
 ### `handle_dialog`
 
-**Description:** If a browser dialog was opened, use this command to handle it
+**Description:** If one or more browser dialogs are open in the queue, use this command to handle them.
 
 **Parameters:**
 
 - **action** (enum: "accept", "dismiss") **(required)**: Whether to dismiss or accept the dialog
 - **pageId** (number) **(required)**: Targets a specific page by ID.
+- **all** (boolean) _(optional)_: Handle all currently queued dialogs in FIFO order.
 - **promptText** (string) _(optional)_: Optional prompt text to enter into the dialog.
+- **slotIndex** (integer) _(optional)_: Zero-based queue slot index to handle when multiple dialogs are queued (default: 0).
+
+---
+
+### `handle_file_chooser`
+
+**Description:** Enable/disable Page.fileChooserOpened interception, list queued choosers, or accept (with filePaths) / cancel an intercepted chooser without blocking the browser.
+
+**Parameters:**
+
+- **action** (enum: "accept", "cancel", "list", "enable", "disable") **(required)**: Action: enable or disable file chooser interception, list queued choosers (auto-enables interception if unset), accept a pending chooser with filePaths, or cancel it.
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **filePaths** (array) _(optional)_: One or more local file paths when action="accept". Paths must be local to the browser instance.
+- **includeSnapshot** (boolean) _(optional)_: Whether to include a snapshot in the response. Default is false.
+- **index** (integer) _(optional)_: Zero-based index in the pending file chooser queue (default: 0).
 
 ---
 
@@ -210,6 +238,21 @@
 
 ---
 
+### `wait_for_dialog`
+
+**Description:** Wait for a browser dialog (alert/confirm/prompt/beforeunload) or resolve immediately with a queued dialog, optionally accepting or dismissing it.
+
+**Parameters:**
+
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **action** (enum: "accept", "dismiss") _(optional)_: Optional action to run immediately on the matched dialog if it was queued rather than auto-handled.
+- **messageRegex** (string) _(optional)_: Optional regex matched against the dialog message.
+- **promptText** (string) _(optional)_: Prompt input text when action="accept" on a prompt dialog.
+- **timeoutMs** (integer) _(optional)_: Timeout in milliseconds (default: 10000).
+- **type** (enum: "alert", "confirm", "prompt", "beforeunload") _(optional)_: Filter by expected dialog type.
+
+---
+
 ### `click_at`
 
 **Description:** Clicks at the provided coordinates (requires flag: --experimentalVision=true)
@@ -238,17 +281,16 @@
 
 ### `connect_browser`
 
-**Description:** Dynamically connect or hot-switch to another Chrome browser instance at runtime without restarting chrome-devtools-mcp. Supports attaching via wsEndpoint (such as a local proxy from cua-ycwang:browser_prepare), browserUrl, or autoConnect/userDataDir, or launching an isolated/incognito Chrome instance.
+**Description:** Dynamically connect or hot-switch to another Chrome browser instance at runtime without restarting chrome-devtools-mcp. Supports attaching via wsEndpoint (such as a local proxy from cua-ycwang:browser_prepare) or browserUrl, or launching an isolated/incognito/userDataDir Chrome instance.
 
 **Parameters:**
 
-- **autoConnect** (boolean) _(optional)_: Attach automatically via DevToolsActivePort using channel or userDataDir.
 - **browserUrl** (string) _(optional)_: HTTP/HTTPS remote debugging URL (e.g., http://127.0.0.1:9222) to attach to.
-- **channel** (enum: "canary", "dev", "beta", "stable") _(optional)_: Chrome release channel when using autoConnect or launching.
+- **channel** (enum: "canary", "dev", "beta", "stable") _(optional)_: Chrome release channel when launching Chrome.
 - **headless** (boolean) _(optional)_: Override headless mode when launching an isolated browser.
 - **incognito** (boolean) _(optional)_: Launch the browser window in incognito mode (--incognito). Defaults isolated=true when userDataDir is omitted.
 - **isolated** (boolean) _(optional)_: Launch a separate Chrome instance using a clean temporary profile that is cleaned up on switch/shutdown.
-- **userDataDir** (string) _(optional)_: User data directory to attach to (with autoConnect=true) or launch with.
+- **userDataDir** (string) _(optional)_: User data directory to launch Chrome with.
 - **wsEndpoint** (string) _(optional)_: WebSocket endpoint (ws:// or wss://) to connect to, such as the restricted local loopback proxy ws_endpoint returned by cua-ycwang:browser_prepare.
 - **wsHeaders** (string) _(optional)_: Optional JSON object string of custom headers when connecting via wsEndpoint or browserUrl.
 
@@ -312,6 +354,26 @@
 - **text** (array) **(required)**: Non-empty list of texts. Resolves when any value matches an accessible name exactly or is a substring of DOM text. Matching is case-sensitive. DOM text preserves spaces and newlines, unlike snapshot text which may normalize whitespace. Use the original whitespace or a shorter distinctive substring.
 - **timeout** (integer) _(optional)_: Maximum wait time in milliseconds. If set to 0, the default timeout will be used.
 - **visible** (boolean) _(optional)_: If true, wait until the matching text is visible. By default, hidden text also counts.
+
+---
+
+### `wait_for_dom`
+
+**Description:** Wait for DOM elements matching a CSS selector (supports Open Shadow DOM `>>>` piercing) and optional frameId, visibility/detachment state, text/textRegex, or attribute assertions.
+
+**Parameters:**
+
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **selector** (string) **(required)**: CSS selector, or Open Shadow DOM piercing path using `>>>` (e.g. `host-el >>> shadow-child >>> button.primary`).
+- **attributeName** (string) _(optional)_: Optional DOM attribute name that must exist on the element.
+- **attributeValue** (string) _(optional)_: Optional exact attribute value (requires attributeName).
+- **frameId** (string) _(optional)_: Target frameId to restrict lookup; when omitted, searches main frame and all child frames.
+- **includeSnapshot** (boolean) _(optional)_: Include an accessibility snapshot once the DOM condition passes.
+- **pollIntervalMs** (integer) _(optional)_: Polling interval in milliseconds (default: 100).
+- **state** (enum: "visible", "hidden", "attached", "detached") _(optional)_: DOM state to wait for (default: "visible").
+- **text** (string) _(optional)_: Optional case-sensitive substring required inside element text.
+- **textRegex** (string) _(optional)_: Optional regex matched against element text.
+- **timeout** (integer) _(optional)_: Maximum wait time in milliseconds. If set to 0, the default timeout will be used.
 
 ---
 
@@ -404,6 +466,37 @@
 
 ---
 
+### `handle_auth_challenge`
+
+**Description:** Inspect, respond to, or configure runtime policy for HTTP 401/407 authentication challenges captured via CDP Fetch.authRequired.
+
+**Parameters:**
+
+- **action** (enum: "provide", "cancel", "default", "list", "set_policy") **(required)**: Action: provide credentials, cancel auth, use browser default, list pending/history, or set runtime default/rule policy.
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **challengeId** (string) _(optional)_: Target challenge ID (defaults to oldest pending challenge).
+- **defaultAction** (enum: "cancel", "default", "queue") _(optional)_: Default runtime auth policy when action="set_policy".
+- **originRegex** (string) _(optional)_: Optional regex matching auth origin when action="set_policy".
+- **password** (string) _(optional)_: Password for action="provide" or runtime provide rule.
+- **queueTimeoutMs** (integer) _(optional)_: Timeout ms for queued challenges before auto-canceling.
+- **realmRegex** (string) _(optional)_: Optional regex matching auth realm when action="set_policy".
+- **source** (enum: "Server", "Proxy") _(optional)_: Auth source filter when action="set_policy".
+- **urlRegex** (string) _(optional)_: Optional regex matching request URL when action="set_policy".
+- **username** (string) _(optional)_: Username for action="provide" or runtime provide rule.
+
+---
+
+### `list_downloads`
+
+**Description:** List tracked browser downloads captured via CDP Browser.downloadWillBegin and Browser.downloadProgress.
+
+**Parameters:**
+
+- **limit** (integer) _(optional)_: Maximum number of recent downloads to return.
+- **state** (enum: "inProgress", "completed", "canceled") _(optional)_: Filter downloads by state.
+
+---
+
 ### `list_network_requests`
 
 **Description:** Lists the most recent requests for the target page since the last navigation. With serviceWorkerId, lists the requests of that extension service worker instead.
@@ -416,6 +509,116 @@
 - **pageSize** (integer) _(optional)_: Maximum number of requests to return. When omitted, returns all requests.
 - **resourceTypes** (array) _(optional)_: Filter requests to only return requests of the specified resource types. When omitted or empty, returns all requests.
 - **serviceWorkerId** (string) _(optional)_: List requests made by the service worker with this ID shown by [`list_pages`](#list_pages) (sw-N) instead of the page. The page selected by pageId is still used for the call and its console errors may be appended.
+
+---
+
+### `list_websocket_connections`
+
+**Description:** List active and recently tracked WebSocket connections captured via CDP on the selected page.
+
+**Parameters:**
+
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **status** (enum: "connecting", "open", "closed", "error") _(optional)_: Filter WebSocket connections by current status.
+- **urlPattern** (string) _(optional)_: Optional URL filter (wildcard substring or /regex/flags) to narrow connections.
+
+---
+
+### `poll_monitor_events`
+
+**Description:** Inspect status and poll events matched by hot-reloaded ~/.config/cua-ycwang/network_monitors.json rules.
+
+**Parameters:**
+
+- **flush** (boolean) _(optional)_: Flush pending JSONL file writes before returning results.
+- **limit** (integer) _(optional)_: Maximum number of monitor events to return (default: 50).
+- **monitorId** (string) _(optional)_: Filter buffered events by monitor rule id.
+- **sinceSeq** (integer) _(optional)_: Return events strictly after this sequence number.
+- **type** (enum: "xhr", "fetch", "ws", "sse") _(optional)_: Filter buffered events by source type.
+- **urlPattern** (string) _(optional)_: Optional URL filter (wildcard substring or /regex/flags).
+
+---
+
+### `poll_network_alerts`
+
+**Description:** Poll captured network failures (Network.loadingFailed), HTTP 4xx/5xx responses, and DevTools CORS/CSP/MixedContent audit issues (Audits.issueAdded).
+
+**Parameters:**
+
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **categories** (array) _(optional)_: Filter alerts by category (e.g. cors, csp, http_4xx, auth).
+- **includeCanceled** (boolean) _(optional)_: Include canceled Network.loadingFailed alerts (default: true).
+- **kinds** (array) _(optional)_: Filter alerts by alert kind.
+- **limit** (integer) _(optional)_: Maximum number of alerts to return (default: 50).
+- **sinceSeq** (integer) _(optional)_: Return alerts strictly after this sequence number.
+- **unreadOnly** (boolean) _(optional)_: When true, advance and read from the per-buffer unread cursor.
+- **urlPattern** (string) _(optional)_: Optional URL filter (wildcard substring or /regex/flags).
+
+---
+
+### `poll_sse_events`
+
+**Description:** Poll captured Server-Sent Events (EventSource messages) from the bounded CDP ring buffer on the selected page.
+
+**Parameters:**
+
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **eventName** (string) _(optional)_: Filter by SSE eventName (e.g. "message", "update").
+- **limit** (integer) _(optional)_: Maximum number of SSE events to return (default: 50).
+- **requestId** (string) _(optional)_: Filter SSE events by a specific CDP requestId.
+- **sinceSeq** (integer) _(optional)_: Return events strictly after this sequence number.
+- **unreadOnly** (boolean) _(optional)_: When true, advance and read from the per-buffer unread cursor.
+- **urlPattern** (string) _(optional)_: Optional URL filter (wildcard substring or /regex/flags).
+
+---
+
+### `poll_ws_frames`
+
+**Description:** Poll captured WebSocket frames (sent/received/error) from the bounded CDP ring buffer on the selected page.
+
+**Parameters:**
+
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **direction** (enum: "sent", "received", "error", "all") _(optional)_: Filter frames by direction. Defaults to "all".
+- **limit** (integer) _(optional)_: Maximum number of frames to return (default: 50).
+- **requestId** (string) _(optional)_: Filter frames by a specific WebSocket requestId.
+- **sinceSeq** (integer) _(optional)_: Return frames strictly after this sequence number.
+- **unreadOnly** (boolean) _(optional)_: When true, advance and read from the per-buffer unread cursor.
+- **urlPattern** (string) _(optional)_: Optional URL filter (wildcard substring or /regex/flags).
+
+---
+
+### `wait_for_download`
+
+**Description:** Wait for a browser download to finish (or match an already completed download) and return its suggestedFilename and saved filePath.
+
+**Parameters:**
+
+- **filenameRegex** (string) _(optional)_: Regular expression matched against suggestedFilename.
+- **guid** (string) _(optional)_: Specific download GUID to wait for.
+- **includeExistingCompleted** (boolean) _(optional)_: If true (default), resolve immediately when a matching completed download already exists.
+- **sinceTimestamp** (number) _(optional)_: Only match downloads started at or after this epoch ms.
+- **timeoutMs** (integer) _(optional)_: Timeout in milliseconds (default: 30000).
+- **urlRegex** (string) _(optional)_: Regular expression matched against the download URL.
+
+---
+
+### `wait_for_network_response`
+
+**Description:** Wait for an XHR/Fetch/network response matching urlRegex, method, and/or status, returning the body inline or saving large payloads to tmp/.
+
+**Parameters:**
+
+- **pageId** (number) **(required)**: Targets a specific page by ID.
+- **filePath** (string) _(optional)_: Optional output file path (.json or .txt) inside an allowed root or tmp/ to save the full body.
+- **includeRecentMs** (integer) _(optional)_: Check recently received responses within this lookback window in ms before waiting for new traffic (default: 0).
+- **maxInlineChars** (integer) _(optional)_: Maximum inline body characters before spilling to a tmp/ file (default: 16384).
+- **method** (string) _(optional)_: HTTP method filter (e.g. GET, POST). Case-insensitive.
+- **resourceTypes** (array) _(optional)_: Optional resource types filter (e.g. ["xhr", "fetch"]).
+- **saveToTempFile** (boolean) _(optional)_: Force writing the response body to a temporary file under tmp/ even when small.
+- **status** (integer) _(optional)_: Expected HTTP status code (e.g. 200, 201, 404).
+- **timeoutMs** (integer) _(optional)_: Timeout in milliseconds (default: 15000).
+- **urlRegex** (string) _(optional)_: Regular expression (raw or /pattern/flags) matched against the response URL. Defaults to matching all URLs.
 
 ---
 

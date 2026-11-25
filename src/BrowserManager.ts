@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type {ReadonlyServerConfig} from './config/ServerConfig.js';
+import {CuaProxyClient} from './CuaProxyClient.js';
 import type {
   Browser,
   ChromeReleaseChannel,
@@ -27,6 +28,7 @@ import {
   puppeteerLogger,
   redactConnectOptionsForLogging,
 } from './utils/logger.js';
+import {raceWithSignal} from './utils/raceWithSignal.js';
 import {
   isAllowedUrl,
   validateBrowserUrl,
@@ -42,6 +44,7 @@ interface ResolvedBrowserTarget {
   wsEndpoint?: string;
   wsHeaders?: Record<string, string>;
   autoConnect: boolean;
+  cuaProxy: boolean;
   userDataDir?: string;
   channel?: 'canary' | 'dev' | 'beta' | 'stable';
   isolated: boolean;
@@ -276,6 +279,7 @@ async function loadPuppeteer(): Promise<PuppeteerNode> {
 export class BrowserManager {
   #browser?: Browser;
   #browserMode?: 'launched' | 'connected';
+  #browserIsCuaProxy = false;
   #activeTarget?: ResolvedBrowserTarget;
   #initPromise?: Promise<Browser>;
   #mutex = new Mutex();
@@ -285,6 +289,8 @@ export class BrowserManager {
 
   #browserAttempt: BrowserAttempt = new BrowserAttempt();
   #connectAbortController?: AbortController;
+  #cuaProxyClient?: CuaProxyClient;
+  #cuaProxyForceRefresh = false;
 
   constructor(
     config: ReadonlyServerConfig,
@@ -459,6 +465,8 @@ export class BrowserManager {
   abandonPendingAttempt(): void {
     this.#browserAttempt = new BrowserAttempt();
     this.#initPromise = undefined;
+    this.#cuaProxyForceRefresh = true;
+    this.#cuaProxyClient?.invalidateEndpoint();
     this.#connectAbortController?.abort(
       new Error('Connection attempt was abandoned before it completed.'),
     );
@@ -466,15 +474,30 @@ export class BrowserManager {
     this.#forgetCurrentBrowser();
   }
 
+  #getOrCreateCuaProxyClient(): CuaProxyClient {
+    this.#cuaProxyClient ??= new CuaProxyClient({
+      cuaCommand: this.#config.resolved.cuaCommand,
+    });
+    return this.#cuaProxyClient;
+  }
+
   #effectiveTarget(): ResolvedBrowserTarget {
     if (this.#activeTarget) {
       return this.#activeTarget;
     }
+    const hasExplicitTarget = Boolean(
+      this.#config.resolved.browserUrl ||
+      this.#config.resolved.wsEndpoint ||
+      this.#config.resolved.autoConnect ||
+      this.#config.resolved.isolated ||
+      this.#config.resolved.userDataDir !== undefined,
+    );
     return {
       browserUrl: this.#config.resolved.browserUrl,
       wsEndpoint: this.#config.resolved.wsEndpoint,
       wsHeaders: this.#config.resolved.wsHeaders,
       autoConnect: Boolean(this.#config.resolved.autoConnect),
+      cuaProxy: Boolean(this.#config.resolved.cuaProxy) && !hasExplicitTarget,
       userDataDir: this.#config.resolved.userDataDir,
       channel: this.#config.resolved.channel,
       isolated: Boolean(this.#config.resolved.isolated),
@@ -494,6 +517,7 @@ export class BrowserManager {
       browserUrl: options.browserUrl,
       wsHeaders: options.wsHeaders,
       autoConnect: Boolean(options.autoConnect),
+      cuaProxy: false,
       userDataDir: options.userDataDir,
       channel: options.channel ?? this.#config.resolved.channel,
       isolated,
@@ -502,24 +526,46 @@ export class BrowserManager {
     };
   }
 
-  #installBrowser(browser: Browser, mode: 'launched' | 'connected'): void {
+  #installBrowser(
+    browser: Browser,
+    mode: 'launched' | 'connected',
+    fromCuaProxy = false,
+  ): void {
     this.#browserMode = mode;
+    this.#browserIsCuaProxy = fromCuaProxy;
     this.#browser = browser;
     browser.once('disconnected', () => this.#evictIfCurrent(browser));
   }
 
   async #openBrowser(
     target: ResolvedBrowserTarget,
-  ): Promise<{browser: Browser; mode: 'launched' | 'connected'}> {
+    externalAbortController?: AbortController,
+  ): Promise<{
+    browser: Browser;
+    mode: 'launched' | 'connected';
+    fromCuaProxy: boolean;
+  }> {
+    if (target.cuaProxy) {
+      return {
+        browser: await this.#connectViaCuaProxy(
+          target,
+          externalAbortController,
+        ),
+        mode: 'connected',
+        fromCuaProxy: true,
+      };
+    }
     if (target.browserUrl || target.wsEndpoint || target.autoConnect) {
       return {
-        browser: await this.#connect(target),
+        browser: await this.#connect(target, externalAbortController),
         mode: 'connected',
+        fromCuaProxy: false,
       };
     }
     return {
       browser: await this.#launch(target),
       mode: 'launched',
+      fromCuaProxy: false,
     };
   }
 
@@ -559,32 +605,55 @@ export class BrowserManager {
 
     const previousBrowser = this.#browser;
     const previousMode = this.#browserMode;
+    const previousWasCuaProxy = this.#browserIsCuaProxy;
     if (sameWsTarget) {
       this.#browser = undefined;
       this.#browserMode = undefined;
+      this.#browserIsCuaProxy = false;
       await this.#teardownBrowserHandle(previousBrowser, previousMode);
     }
 
-    const opened = await this.#openBrowser(nextTarget);
-    if (this.#closingCount > 0 || this.#browserAttempt !== attempt) {
-      const reason =
-        this.#closingCount > 0
-          ? 'Browser was closed while initializing.'
-          : 'Connection attempt was abandoned before it completed.';
-      await this.#teardownBrowserHandle(opened.browser, opened.mode);
-      throw new Error(reason);
-    }
-
-    this.#installBrowser(opened.browser, opened.mode);
-    this.#activeTarget = nextTarget;
+    const switchAbortController = new AbortController();
+    this.#connectAbortController = switchAbortController;
     try {
-      await onSwitched?.(opened.browser);
-    } catch (err) {
-      if (this.#browser === opened.browser) {
-        this.#browser = undefined;
-        this.#browserMode = undefined;
+      const opened = await this.#openBrowser(nextTarget, switchAbortController);
+      if (
+        this.#closingCount > 0 ||
+        this.#browserAttempt !== attempt ||
+        switchAbortController.signal.aborted
+      ) {
+        const reason =
+          this.#closingCount > 0
+            ? 'Browser was closed while initializing.'
+            : 'Connection attempt was abandoned before it completed.';
+        await this.#teardownBrowserHandle(opened.browser, opened.mode);
+        throw new Error(reason);
       }
-      await this.#teardownBrowserHandle(opened.browser, opened.mode);
+
+      this.#installBrowser(opened.browser, opened.mode, opened.fromCuaProxy);
+      this.#activeTarget = nextTarget;
+      try {
+        await raceWithSignal(
+          Promise.resolve(onSwitched?.(opened.browser)),
+          switchAbortController.signal,
+        );
+      } catch (err) {
+        if (this.#browser === opened.browser) {
+          this.#browser = undefined;
+          this.#browserMode = undefined;
+          this.#browserIsCuaProxy = false;
+        }
+        await this.#teardownBrowserHandle(opened.browser, opened.mode);
+        if (
+          !sameWsTarget &&
+          previousBrowser &&
+          previousBrowser !== opened.browser
+        ) {
+          await this.#teardownBrowserHandle(previousBrowser, previousMode);
+        }
+        throw err;
+      }
+
       if (
         !sameWsTarget &&
         previousBrowser &&
@@ -592,22 +661,20 @@ export class BrowserManager {
       ) {
         await this.#teardownBrowserHandle(previousBrowser, previousMode);
       }
-      throw err;
+      if (previousWasCuaProxy && sameWsTarget) {
+        this.#cuaProxyForceRefresh = true;
+      }
+      return opened.browser;
+    } finally {
+      if (this.#connectAbortController === switchAbortController) {
+        this.#connectAbortController = undefined;
+      }
     }
-
-    if (
-      !sameWsTarget &&
-      previousBrowser &&
-      previousBrowser !== opened.browser
-    ) {
-      await this.#teardownBrowserHandle(previousBrowser, previousMode);
-    }
-    return opened.browser;
   }
 
   async #initBrowser(): Promise<Browser> {
     const opened = await this.#openBrowser(this.#effectiveTarget());
-    this.#installBrowser(opened.browser, opened.mode);
+    this.#installBrowser(opened.browser, opened.mode, opened.fromCuaProxy);
     return opened.browser;
   }
 
@@ -851,7 +918,78 @@ export class BrowserManager {
     }
   }
 
-  async #connect(target: ResolvedBrowserTarget): Promise<Browser> {
+  async #connectViaCuaProxy(
+    target: ResolvedBrowserTarget,
+    externalAbortController?: AbortController,
+  ): Promise<Browser> {
+    const ownsAbortController = !externalAbortController;
+    const abortController = externalAbortController ?? new AbortController();
+    if (ownsAbortController) {
+      this.#connectAbortController = abortController;
+    }
+    const {signal} = abortController;
+
+    try {
+      const client = this.#getOrCreateCuaProxyClient();
+      const forceRefresh = this.#cuaProxyForceRefresh;
+      this.#cuaProxyForceRefresh = false;
+
+      let wsEndpoint = await client.acquireWsEndpoint({
+        forceRefresh,
+        channel: target.channel,
+        signal,
+      });
+      if (signal.aborted) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Connection attempt was abandoned before it completed.');
+      }
+
+      try {
+        return await this.#connect(
+          {...target, wsEndpoint, autoConnect: false, cuaProxy: false},
+          abortController,
+        );
+      } catch (err) {
+        if (signal.aborted || !isConnectionRefusedError(err)) {
+          throw err;
+        }
+        logger?.(
+          'cuaProxy wsEndpoint failed with ECONNREFUSED; refreshing proxy endpoint from cua-ycwang and retrying',
+          err,
+        );
+        wsEndpoint = await client.acquireWsEndpoint({
+          forceRefresh: true,
+          staleWsEndpoint: wsEndpoint,
+          channel: target.channel,
+          signal,
+        });
+        if (signal.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error(
+                'Connection attempt was abandoned before it completed.',
+              );
+        }
+        return await this.#connect(
+          {...target, wsEndpoint, autoConnect: false, cuaProxy: false},
+          abortController,
+        );
+      }
+    } finally {
+      if (
+        ownsAbortController &&
+        this.#connectAbortController === abortController
+      ) {
+        this.#connectAbortController = undefined;
+      }
+    }
+  }
+
+  async #connect(
+    target: ResolvedBrowserTarget,
+    externalAbortController?: AbortController,
+  ): Promise<Browser> {
     const {
       blockedUrlPattern: blocklist,
       allowedUrlPattern: allowlist,
@@ -884,8 +1022,11 @@ export class BrowserManager {
       );
     }
 
-    const abortController = new AbortController();
-    this.#connectAbortController = abortController;
+    const ownsAbortController = !externalAbortController;
+    const abortController = externalAbortController ?? new AbortController();
+    if (ownsAbortController) {
+      this.#connectAbortController = abortController;
+    }
     const {signal} = abortController;
 
     logger?.(
@@ -1026,7 +1167,10 @@ export class BrowserManager {
       );
     } finally {
       signal.removeEventListener('abort', onAbortDuringConnect);
-      if (this.#connectAbortController === abortController) {
+      if (
+        ownsAbortController &&
+        this.#connectAbortController === abortController
+      ) {
         this.#connectAbortController = undefined;
       }
       if (pendingHandshakeTimer !== undefined) {
@@ -1056,6 +1200,7 @@ export class BrowserManager {
     const mode = this.#browserMode;
     this.#browser = undefined;
     this.#browserMode = undefined;
+    this.#browserIsCuaProxy = false;
     if (mode === 'launched') {
       void this.#closeLaunchedBrowser(browser);
     } else {
@@ -1080,6 +1225,11 @@ export class BrowserManager {
     }
     this.#browser = undefined;
     this.#browserMode = undefined;
+    if (this.#browserIsCuaProxy) {
+      this.#browserIsCuaProxy = false;
+      this.#cuaProxyForceRefresh = true;
+      this.#cuaProxyClient?.invalidateEndpoint();
+    }
   }
 
   async #closeLaunchedBrowser(browser: Browser): Promise<void> {
@@ -1124,6 +1274,7 @@ export class BrowserManager {
     const mode = this.#browserMode;
     this.#browser = undefined;
     this.#browserMode = undefined;
+    this.#browserIsCuaProxy = false;
     await this.#teardownBrowserHandle(browser, mode);
   }
 
@@ -1143,6 +1294,8 @@ export class BrowserManager {
     using guard = await this.#mutex.acquire();
     try {
       await this.#closeBrowser();
+      await this.#cuaProxyClient?.close();
+      this.#cuaProxyClient = undefined;
     } finally {
       this.#closingCount--;
     }

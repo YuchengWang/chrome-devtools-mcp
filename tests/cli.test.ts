@@ -54,6 +54,7 @@ describe('cli args parsing', () => {
     categoryDebugging: true,
     categoryMemory: true,
     autoConnect: false,
+    cuaProxy: false,
     headless: false,
     isolated: false,
     acceptInsecureCerts: false,
@@ -997,6 +998,7 @@ describe('cli args parsing', () => {
 
     for (const connectArgs of [
       ['--auto-connect'],
+      ['--cua-proxy'],
       ['--browserUrl', 'http://localhost:9222'],
       ['--wsEndpoint', 'ws://localhost:9222'],
       ['--user-data-dir', '/tmp/chrome-profile'],
@@ -1105,6 +1107,27 @@ describe('cli args parsing', () => {
         () => parseConfig(['--category-pwa', '--auto-connect']),
         /Arguments categoryPwa and autoConnect are mutually exclusive/,
       );
+    });
+
+    it('rejects cuaProxy with autoConnect and categoryPwa', async () => {
+      assert.throws(
+        () => parseConfig(['--cuaProxy', '--auto-connect']),
+        /Arguments autoConnect and cuaProxy are mutually exclusive/,
+      );
+      assert.throws(
+        () => parseConfig(['--category-pwa', '--cuaProxy']),
+        /Arguments categoryPwa and cuaProxy are mutually exclusive/,
+      );
+    });
+
+    it('parses cuaProxy and cuaCommand options', () => {
+      const args = parseConfig([
+        '--cuaProxy',
+        '--cuaCommand',
+        '/tmp/mock-cua-ycwang',
+      ]);
+      assert.strictEqual(args.cuaProxy, true);
+      assert.strictEqual(args.cuaCommand, '/tmp/mock-cua-ycwang');
     });
 
     it('rejects categoryPwa with browserUrl', async () => {
@@ -1802,6 +1825,7 @@ describe('flag usage telemetry', () => {
   });
 
   for (const connectArgs of [
+    ['--cuaProxy'],
     ['--browserUrl', 'http://localhost:9222'],
     ['--wsEndpoint', 'ws://localhost:9222'],
     ['--executablePath', '/tmp/chrome'],

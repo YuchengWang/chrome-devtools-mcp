@@ -18,7 +18,7 @@ export const connectBrowser: BrowserlessToolFactory = defineBrowserlessTool(
   () => ({
     name: 'connect_browser',
     description:
-      'Dynamically connect or hot-switch to another Chrome browser instance at runtime without restarting chrome-devtools-mcp. Supports attaching via wsEndpoint (such as a local proxy from cua-ycwang:browser_prepare), browserUrl, or autoConnect/userDataDir, or launching an isolated/incognito Chrome instance.',
+      'Dynamically connect or hot-switch to another Chrome browser instance at runtime without restarting chrome-devtools-mcp. Supports attaching via wsEndpoint (such as a local proxy from cua-ycwang:browser_prepare) or browserUrl, or launching an isolated/incognito/userDataDir Chrome instance.',
     annotations: {
       category: ToolCategory.NAVIGATION,
       readOnlyHint: false,
@@ -42,24 +42,14 @@ export const connectBrowser: BrowserlessToolFactory = defineBrowserlessTool(
         .describe(
           'Optional JSON object string of custom headers when connecting via wsEndpoint or browserUrl.',
         ),
-      autoConnect: zod
-        .boolean()
-        .optional()
-        .describe(
-          'Attach automatically via DevToolsActivePort using channel or userDataDir.',
-        ),
       userDataDir: zod
         .string()
         .optional()
-        .describe(
-          'User data directory to attach to (with autoConnect=true) or launch with.',
-        ),
+        .describe('User data directory to launch Chrome with.'),
       channel: zod
         .enum(['canary', 'dev', 'beta', 'stable'])
         .optional()
-        .describe(
-          'Chrome release channel when using autoConnect or launching.',
-        ),
+        .describe('Chrome release channel when launching Chrome.'),
       isolated: zod
         .boolean()
         .optional()
@@ -85,7 +75,6 @@ export const connectBrowser: BrowserlessToolFactory = defineBrowserlessTool(
         wsEndpoint,
         browserUrl,
         wsHeaders,
-        autoConnect,
         userDataDir,
         channel,
         isolated,
@@ -97,7 +86,6 @@ export const connectBrowser: BrowserlessToolFactory = defineBrowserlessTool(
         ...(wsEndpoint !== undefined ? {wsEndpoint} : {}),
         ...(browserUrl !== undefined ? {browserUrl} : {}),
         ...(parsedHeaders !== undefined ? {wsHeaders: parsedHeaders} : {}),
-        ...(autoConnect !== undefined ? {autoConnect} : {}),
         ...(userDataDir !== undefined ? {userDataDir} : {}),
         ...(channel !== undefined ? {channel} : {}),
         ...(isolated !== undefined ? {isolated} : {}),
@@ -113,10 +101,6 @@ export const connectBrowser: BrowserlessToolFactory = defineBrowserlessTool(
       } else if (options.browserUrl) {
         response.appendResponseLine(
           `Connected and switched active browser to ${options.browserUrl}.`,
-        );
-      } else if (options.autoConnect) {
-        response.appendResponseLine(
-          'Connected and switched active browser via autoConnect.',
         );
       } else {
         const modeDesc = options.incognito ? 'incognito isolated' : 'isolated';

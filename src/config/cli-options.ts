@@ -362,7 +362,7 @@ export const commands: Commands = {
   },
   connect_browser: {
     description:
-      'Dynamically connect or hot-switch to another Chrome browser instance at runtime without restarting chrome-devtools-mcp. Supports attaching via wsEndpoint (such as a local proxy from cua-ycwang:browser_prepare), browserUrl, or autoConnect/userDataDir, or launching an isolated/incognito Chrome instance.',
+      'Dynamically connect or hot-switch to another Chrome browser instance at runtime without restarting chrome-devtools-mcp. Supports attaching via wsEndpoint (such as a local proxy from cua-ycwang:browser_prepare) or browserUrl, or launching an isolated/incognito/userDataDir Chrome instance.',
     category: 'Navigation automation',
     args: {
       wsEndpoint: {
@@ -389,27 +389,17 @@ export const commands: Commands = {
         required: false,
         positional: false,
       },
-      autoConnect: {
-        name: 'autoConnect',
-        type: 'boolean',
-        description:
-          'Attach automatically via DevToolsActivePort using channel or userDataDir.',
-        required: false,
-        positional: false,
-      },
       userDataDir: {
         name: 'userDataDir',
         type: 'string',
-        description:
-          'User data directory to attach to (with autoConnect=true) or launch with.',
+        description: 'User data directory to launch Chrome with.',
         required: false,
         positional: false,
       },
       channel: {
         name: 'channel',
         type: 'string',
-        description:
-          'Chrome release channel when using autoConnect or launching.',
+        description: 'Chrome release channel when launching Chrome.',
         required: false,
         positional: false,
         enum: ['canary', 'dev', 'beta', 'stable'],

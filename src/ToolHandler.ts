@@ -380,8 +380,9 @@ export class ToolHandler {
   }
 
   /**
-   * Browserless tools never establish a browser connection, so they also never
-   * wait for one under TOOL_CALL_TIMEOUT_MS.
+   * Browserless tools normally never establish a browser connection, except
+   * `connect_browser`, which acquires BrowserManager's connection mutex and
+   * therefore runs under TOOL_CALL_TIMEOUT_MS and abort cleanup.
    */
   async #runBrowserlessTool(
     tool: BrowserlessToolDefinition,
@@ -390,13 +391,37 @@ export class ToolHandler {
     context: McpContext,
     signal: AbortSignal,
   ): ReturnType<McpResponse['handle']> {
+    const isConnectTool = tool.name === 'connect_browser';
+    const onAbort = isConnectTool
+      ? () => {
+          this.abandonPendingBrowserAttemptOnTimeout();
+        }
+      : undefined;
+    if (onAbort) {
+      signal.addEventListener('abort', onAbort, {once: true});
+    }
     try {
       await validateToolFiles(tool, params, context, true);
       signal.throwIfAborted();
-      await tool.handler({params}, response, context);
+      if (isConnectTool) {
+        await this.#raceWithTimeout(
+          tool.handler({params}, response, context),
+          () => this.abandonPendingBrowserAttemptOnTimeout(),
+          signal,
+        );
+      } else {
+        await tool.handler({params}, response, context);
+      }
     } catch (err) {
       signal.throwIfAborted();
+      if (err instanceof ToolCallTimeoutError) {
+        throw err;
+      }
       response.setError(toError(err));
+    } finally {
+      if (onAbort) {
+        signal.removeEventListener('abort', onAbort);
+      }
     }
     signal.throwIfAborted();
     return await response.handle(

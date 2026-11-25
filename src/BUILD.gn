@@ -176,6 +176,7 @@ ts_library("mcp_lib") {
 
   sources = [
     "BrowserManager.ts",
+    "CuaProxyClient.ts",
     "LogpointManager.ts",
     "McpContext.ts",
     "McpPage.ts",

@@ -14,6 +14,8 @@ import type {McpOptionsFor} from './category-options.js';
 
 export interface BrowserArguments {
   autoConnect: boolean;
+  cuaProxy: boolean;
+  cuaCommand?: string;
   browserUrl?: string;
   wsEndpoint?: string;
   wsHeaders?: Record<string, string>;
@@ -35,6 +37,17 @@ export const browserOptions: BrowserOptions = {
     description:
       'If specified, automatically connects to a browser (Chrome 144+) running locally from the user data directory identified by the channel param (default channel is stable). Requires the remote debugging server to be started in the Chrome instance via chrome://inspect/#remote-debugging.',
     default: false,
+  },
+  cuaProxy: {
+    type: 'boolean',
+    description:
+      "If specified, connects to the user's running Chrome profile via a long-lived cua-ycwang local CDP proxy (existing_profile), launching Chrome if needed and automatically recovering expired proxy sessions without duplicate consent prompts.",
+    default: false,
+  },
+  cuaCommand: {
+    type: 'string',
+    description:
+      'Executable path or command for the cua-ycwang MCP server used with --cuaProxy (defaults to ~/.local/bin/cua-ycwang or cua-ycwang on PATH).',
   },
   browserUrl: {
     type: 'string',

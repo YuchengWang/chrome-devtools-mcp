@@ -185,7 +185,8 @@ export class ServerConfig implements ReadonlyServerConfig {
     const launchesByChannel =
       !resolvedArgs.browserUrl &&
       !resolvedArgs.wsEndpoint &&
-      !resolvedArgs.executablePath;
+      !resolvedArgs.executablePath &&
+      !resolvedArgs.cuaProxy;
     if (!launchesByChannel && explicitArgs.channel === undefined) {
       delete resolvedArgs.channel;
     }
@@ -202,6 +203,7 @@ export class ServerConfig implements ReadonlyServerConfig {
       }
       const connectsToExistingBrowser =
         resolvedArgs.autoConnect ||
+        resolvedArgs.cuaProxy ||
         resolvedArgs.browserUrl ||
         resolvedArgs.wsEndpoint;
       if (

@@ -435,9 +435,11 @@ export const CONFLICTING_ARGS: Array<Array<keyof McpOptions>> = [
   ['userDataDir', 'isolated'],
   ['autoConnect', 'isolated'],
   ['autoConnect', 'executablePath'],
+  ['autoConnect', 'cuaProxy'],
   ['blockedUrlPattern', 'allowedUrlPattern'],
   ['allowUnrestrictedPaths', 'filesystemRoot'],
   ['categoryPwa', 'autoConnect'],
+  ['categoryPwa', 'cuaProxy'],
   ['categoryPwa', 'browserUrl', 'wsEndpoint'],
 ];
 

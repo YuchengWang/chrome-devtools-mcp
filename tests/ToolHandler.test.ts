@@ -13,22 +13,30 @@ import {pathToFileURL} from 'node:url';
 
 import sinon from 'sinon';
 
+import {BrowserManager, connectTransport} from '../src/BrowserManager.js';
 import {ConfigLocator} from '../src/config/ConfigLocator.js';
 import {ConfigParser} from '../src/config/ConfigParser.js';
-import type {McpContext} from '../src/McpContext.js';
+import {McpContext} from '../src/McpContext.js';
 import {McpPage} from '../src/McpPage.js';
 import {McpResponse, type DataFormat} from '../src/McpResponse.js';
+import {HeapSnapshotManager} from '../src/processors/HeapSnapshotManager.js';
 import {SlimMcpResponse} from '../src/SlimMcpResponse.js';
 import {ClearcutLogger} from '../src/telemetry/ClearcutLogger.js';
 import {FilePersistence} from '../src/telemetry/persistence.js';
 import {McpClient, WatchdogMessageType} from '../src/telemetry/types.js';
 import {WatchdogClient} from '../src/telemetry/WatchdogClient.js';
 import {
+  Locator,
+  puppeteer,
+  type ConnectionTransport,
+} from '../src/third_party/browser.js';
+import {
   ProtocolError,
   ProtocolErrorCode,
   zod,
 } from '../src/third_party/index.js';
 import {TOOL_CALL_TIMEOUT_MS, ToolHandler} from '../src/ToolHandler.js';
+import {connectBrowser} from '../src/tools/browser.js';
 import {ToolCategory} from '../src/tools/categories.js';
 import {emulate} from '../src/tools/emulation.js';
 import {pressKey, typeText} from '../src/tools/input.js';
@@ -47,7 +55,11 @@ import {mockNetwork} from '../src/tools/network.js';
 import {selectPage} from '../src/tools/pages.js';
 import {createTools} from '../src/tools/tools.js';
 import {TaskRunner, type TaskQueue} from '../src/utils/TaskRunner.js';
-import {createMockMcpContext, createMockMcpPage} from './mocks.js';
+import {
+  createMockMcpContext,
+  createMockMcpPage,
+  createMockPuppeteerBrowser,
+} from './mocks.js';
 import {getMockBrowser, settle, withMcpContext} from './utils.js';
 
 describe('ToolHandler', () => {
@@ -2722,6 +2734,159 @@ describe('ToolHandler', () => {
       sinon.assert.calledOnce(abandonPendingBrowserAttemptSpy);
     } finally {
       clock.restore();
+    }
+  });
+
+  it('times out hanging connect_browser, triggers abort(), and releases BrowserManager mutex', async () => {
+    const config = parseConfig();
+    const manager = new BrowserManager(config);
+    const taskRunner = new TaskRunner();
+    const heapSnapshotManager = new HeapSnapshotManager(taskRunner);
+    const abandonSpy = sinon.spy(() => manager.abandonPendingAttempt());
+    const context = McpContext.create(
+      undefined,
+      {
+        config,
+        heapSnapshotManager,
+        taskRunner,
+        getBrowser: () => manager.ensureBrowser(),
+        connectBrowser: (options, onSwitched) =>
+          manager.connectBrowser(options, onSwitched),
+      },
+      Locator,
+    );
+
+    const firstAttemptStarted = Promise.withResolvers<void>();
+    const okBrowser = createMockPuppeteerBrowser();
+    okBrowser.targets.returns([]);
+    const transport: ConnectionTransport = {
+      send: sinon.stub(),
+      close: sinon.stub(),
+    };
+    const createStub = sinon.stub(connectTransport, 'create');
+    createStub
+      .onFirstCall()
+      .callsFake((_url, _headers, _logger, _opts, signal) => {
+        firstAttemptStarted.resolve();
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new Error('Aborted hung connect')),
+            {once: true},
+          );
+        });
+      });
+    createStub.onSecondCall().resolves({transport, terminate: sinon.stub()});
+    sinon.stub(puppeteer, 'connect').resolves(okBrowser);
+
+    const handler = new ToolHandler(
+      connectBrowser(config.resolved),
+      config,
+      async () => context,
+      abandonSpy,
+    );
+
+    const clock = sinon.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
+    try {
+      const pending = handler.handle({
+        wsEndpoint: 'ws://127.0.0.1:19999/devtools/browser/hang',
+      });
+      await firstAttemptStarted.promise;
+      await clock.tickAsync(TOOL_CALL_TIMEOUT_MS);
+      const timedOutResult = await pending;
+
+      assert.strictEqual(timedOutResult.isError, true);
+      assert.match(
+        timedOutResult.content[0].type === 'text'
+          ? timedOutResult.content[0].text
+          : '',
+        /timed out/,
+      );
+      sinon.assert.calledOnce(abandonSpy);
+
+      const recovered = await handler.handle({
+        wsEndpoint: 'ws://127.0.0.1:19999/devtools/browser/ok',
+      });
+      assert.notStrictEqual(recovered.isError, true);
+      assert.strictEqual(await manager.ensureBrowser(), okBrowser);
+    } finally {
+      clock.restore();
+      context.dispose();
+      heapSnapshotManager.dispose();
+      await manager.close();
+    }
+  });
+
+  it('aborts hanging connect_browser on cancellation and releases BrowserManager mutex', async () => {
+    const config = parseConfig();
+    const manager = new BrowserManager(config);
+    const taskRunner = new TaskRunner();
+    const heapSnapshotManager = new HeapSnapshotManager(taskRunner);
+    const abandonSpy = sinon.spy(() => manager.abandonPendingAttempt());
+    const context = McpContext.create(
+      undefined,
+      {
+        config,
+        heapSnapshotManager,
+        taskRunner,
+        getBrowser: () => manager.ensureBrowser(),
+        connectBrowser: (options, onSwitched) =>
+          manager.connectBrowser(options, onSwitched),
+      },
+      Locator,
+    );
+
+    const firstAttemptStarted = Promise.withResolvers<void>();
+    const okBrowser = createMockPuppeteerBrowser();
+    okBrowser.targets.returns([]);
+    const transport: ConnectionTransport = {
+      send: sinon.stub(),
+      close: sinon.stub(),
+    };
+    const createStub = sinon.stub(connectTransport, 'create');
+    createStub
+      .onFirstCall()
+      .callsFake((_url, _headers, _logger, _opts, signal) => {
+        firstAttemptStarted.resolve();
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new Error('Aborted cancelled connect')),
+            {once: true},
+          );
+        });
+      });
+    createStub.onSecondCall().resolves({transport, terminate: sinon.stub()});
+    sinon.stub(puppeteer, 'connect').resolves(okBrowser);
+
+    const handler = new ToolHandler(
+      connectBrowser(config.resolved),
+      config,
+      async () => context,
+      abandonSpy,
+    );
+    const controller = new AbortController();
+
+    try {
+      const pending = handler.handle(
+        {wsEndpoint: 'ws://127.0.0.1:19999/devtools/browser/hang'},
+        {signal: controller.signal},
+      );
+      await firstAttemptStarted.promise;
+      controller.abort();
+      await assert.rejects(pending, {name: 'AbortError'});
+      sinon.assert.calledOnce(abandonSpy);
+      assert.deepStrictEqual(getEventListeners(controller.signal, 'abort'), []);
+
+      const recovered = await handler.handle({
+        wsEndpoint: 'ws://127.0.0.1:19999/devtools/browser/ok',
+      });
+      assert.notStrictEqual(recovered.isError, true);
+      assert.strictEqual(await manager.ensureBrowser(), okBrowser);
+    } finally {
+      context.dispose();
+      heapSnapshotManager.dispose();
+      await manager.close();
     }
   });
 

@@ -33,7 +33,7 @@ describe('browser tools', () => {
   serverHooks();
 
   describe('connect_browser', () => {
-    it('registers as a browserless exclusive navigation tool', () => {
+    it('registers as a browserless exclusive navigation tool without autoConnect in schema', () => {
       const args = createMockParsedArguments();
       const tool = connectBrowser(args);
       assert.strictEqual(tool.name, 'connect_browser');
@@ -41,6 +41,24 @@ describe('browser tools', () => {
       assert.strictEqual(tool.annotations.readOnlyHint, false);
       assert.strictEqual(tool.concurrency, 'exclusive');
       assert.strictEqual(isBrowserlessTool(tool), true);
+      assert.strictEqual('autoConnect' in tool.schema, false);
+    });
+
+    it('rejects autoConnect input via strict schema validation', async () => {
+      const config = createMockServerConfig();
+      const {context} = createHandlerMocks();
+      const strictHandler = new ToolHandler(
+        connectBrowser(config.resolved),
+        config,
+        async () => context as never,
+        () => {},
+      );
+      const result = await strictHandler.handle({autoConnect: true});
+      assert.strictEqual(result.isError, true);
+      assert.match(
+        getTextContent(result.content[0]),
+        /Invalid arguments for tool connect_browser/,
+      );
     });
 
     it('forwards wsEndpoint and parsed wsHeaders and includes updated pages', async () => {

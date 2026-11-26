@@ -21,6 +21,15 @@ automation, in-depth debugging, and performance analysis.
   [puppeteer](https://github.com/puppeteer/puppeteer) to automate actions in
   Chrome and automatically wait for action results.
 
+## Fork Optimizations (`develop`)
+
+This fork adds agent-focused optimizations over upstream `1.14.0` (see [CHANGELOG_YCWANG.md](./CHANGELOG_YCWANG.md) for full details):
+
+- **Response & Snapshot Efficiency**: `8.8 KB` automatic response folding, `inline: false` screenshot isolation, and `outlineOnly` / `formsOnly` / `roles` / `rootUid` hierarchical snapshot filtering.
+- **Browser Lifecycle & Proxy Auto-Attach**: `--cuaProxy` auto-attach with TTL self-healing and `connect_browser` runtime hot-switching (`wsEndpoint`, `incognito`, `isolated`).
+- **Batching & Diagnostics**: `batch_actions` for multi-step execution and `diagnose_page_load` for unified load/network/console diagnostics.
+- **Realtime CDP Capture & Queues**: Realtime WS/SSE/XHR capture (`list_websocket_connections`, `poll_ws_frames`, `poll_sse_events`, `wait_for_network_response`, `poll_network_alerts`, `poll_monitor_events`), download/file-chooser/dialog/HTTP-auth queues (`list_downloads`, `wait_for_download`, `handle_file_chooser`, `wait_for_dialog`, `handle_auth_challenge`), Shadow DOM-aware `wait_for_dom` (`>>>`), and hot-reloaded `network_monitors.json`.
+
 ## Disclaimers
 
 `chrome-devtools-mcp` exposes content of the browser instance to the MCP clients

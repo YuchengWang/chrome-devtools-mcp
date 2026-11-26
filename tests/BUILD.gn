@@ -117,6 +117,7 @@ ts_library("tests") {
     "utils/RingBuffer.test.ts",
     "utils/TaskRunner.test.ts",
     "utils/WaitForHelper.test.ts",
+    "utils/authGateDetector.test.ts",
     "utils/bytes.test.ts",
     "utils/check-for-updates.test.ts",
     "utils/errorHandling.test.ts",

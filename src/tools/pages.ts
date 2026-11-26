@@ -7,6 +7,7 @@
 import type {ParsedArguments} from '../config/mcp-options.js';
 import {zod} from '../third_party/index.js';
 import type {CdpPage} from '../third_party/browser.js';
+import {detectAuthGate} from '../utils/authGateDetector.js';
 import {
   compileRegex,
   getErrorMessage,
@@ -468,6 +469,13 @@ export const navigatePage: PageToolFactory = definePageTool(
         response.setIncludePages(true);
         response.setListThirdPartyDeveloperTools();
         response.setListWebMcpTools();
+
+        if (!isBrowserDisconnected(page)) {
+          const authGate = await detectAuthGate(page.pptrPage);
+          if (authGate.detected && authGate.signal) {
+            response.appendResponseLine(authGate.signal);
+          }
+        }
       },
     };
   },

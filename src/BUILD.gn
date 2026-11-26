@@ -271,6 +271,7 @@ ts_library("mcp_lib") {
     "utils/RingBuffer.ts",
     "utils/TaskRunner.ts",
     "utils/WaitForHelper.ts",
+    "utils/authGateDetector.ts",
     "utils/bytes.ts",
     "utils/check-for-updates.ts",
     "utils/disclaimers.ts",

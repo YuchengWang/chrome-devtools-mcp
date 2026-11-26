@@ -7,6 +7,7 @@
 import {loadBrowser, zod} from '../third_party/index.js';
 import type {ElementHandle, KeyInput} from '../third_party/browser.js';
 import type {TextSnapshotNode} from '../types.js';
+import {collectNewTabAndAuthSignals} from '../utils/authGateDetector.js';
 import {parseKey, throwIfInvalidKey} from '../utils/keyboard.js';
 import {logger} from '../utils/logger.js';
 import {raceWithSignal} from '../utils/raceWithSignal.js';
@@ -158,12 +159,13 @@ export const click: PageToolFactory = definePageTool(() => ({
   blockedByDialog: true,
   concurrency: 'page',
   verifyFilesSchema: {},
-  handler: async (request, response) => {
+  handler: async (request, response, context) => {
     const uid = request.params.uid;
     using handle = await request.page.getElementByUid(uid);
     const aXNode = request.page.getAXNodeByUid(uid);
     const shouldSelectNativeOption =
       !request.params.dblClick && aXNode?.role === 'option';
+    const pageIdsBefore = new Set(context.getPages().map(p => p.id));
     try {
       const result = await request.page.waitForEventsAfterAction(
         async signal => {
@@ -186,6 +188,7 @@ export const click: PageToolFactory = definePageTool(() => ({
           : `Successfully clicked on the element`,
       );
       response.attachWaitForResult(result);
+
       if (request.params.includeSnapshot) {
         response.includeSnapshot();
       }
@@ -196,6 +199,19 @@ export const click: PageToolFactory = definePageTool(() => ({
           ? `The element was double clicked and it opened a dialog.`
           : `The element was clicked and it opened a dialog.`,
       );
+      return;
+    }
+
+    const newPages = context
+      .getPages()
+      .filter(p => !pageIdsBefore.has(p.id));
+    const signalLines = await collectNewTabAndAuthSignals({
+      newPages,
+      activePage: request.page,
+      source: 'click',
+    });
+    for (const line of signalLines) {
+      response.appendResponseLine(line);
     }
   },
 }));

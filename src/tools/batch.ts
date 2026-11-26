@@ -7,6 +7,7 @@
 import type {ParsedArguments} from '../config/mcp-options.js';
 import {zod} from '../third_party/index.js';
 import type {JSHandle} from '../third_party/browser.js';
+import {collectNewTabAndAuthSignals} from '../utils/authGateDetector.js';
 import {isDetachedNavigationError} from '../utils/errorHandling.js';
 import {validateUrl} from '../utils/url.js';
 
@@ -95,6 +96,7 @@ export const batchActions: PageToolFactory = definePageTool(
     handler: async (request, response, context) => {
       let page = request.page;
       const stopOnError = request.params.stopOnError ?? true;
+      const pageIdsBefore = new Set(context.getPages().map(p => p.id));
 
       for (let i = 0; i < request.params.actions.length; i++) {
         const action = request.params.actions[i];
@@ -257,6 +259,18 @@ export const batchActions: PageToolFactory = definePageTool(
             throw error;
           }
         }
+      }
+
+      const newPages = context
+        .getPages()
+        .filter(p => !pageIdsBefore.has(p.id));
+      const signalLines = await collectNewTabAndAuthSignals({
+        newPages,
+        activePage: page,
+        source: 'batch_actions',
+      });
+      for (const line of signalLines) {
+        response.appendResponseLine(line);
       }
 
       if (request.params.includeSnapshot) {

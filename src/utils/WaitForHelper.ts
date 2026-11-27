@@ -76,7 +76,6 @@ export class WaitForHelper {
         domObserver.observer.observe(document.body, {
           childList: true,
           subtree: true,
-          attributes: true,
         });
 
         return domObserver;
@@ -126,6 +125,7 @@ export class WaitForHelper {
     action: (signal: AbortSignal) => Promise<unknown>,
     options?: {
       timeout?: number;
+      waitUntil?: 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2';
       waitForStableDom?: boolean;
       expectNavigationIn?: number;
       handleDialog?:
@@ -260,6 +260,7 @@ export class WaitForHelper {
         timeout: 0,
         signal: this.#abortController.signal,
         ignoreSameDocumentNavigation: true,
+        ...(options?.waitUntil ? {waitUntil: options.waitUntil} : {}),
       })
       .then(result => {
         navigationStartedResolvers.resolve(true);

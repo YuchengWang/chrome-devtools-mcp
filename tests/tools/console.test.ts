@@ -386,9 +386,8 @@ logFromOld();
 
       await withMcpContext(async (response, context, args) => {
         const page = context.getSelectedMcpPage();
-        const model = page.devtoolsUniverse?.target.model(
-          DevTools.DebuggerModel,
-        );
+        const devtoolsUniverse = await page.ensureDevToolsUniverse();
+        const model = devtoolsUniverse?.target.model(DevTools.DebuggerModel);
         assert.ok(model);
         const oldUrl = server.getRoute('/old.html');
         await page.pptrPage.goto(oldUrl);

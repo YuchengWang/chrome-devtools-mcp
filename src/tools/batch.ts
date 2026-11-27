@@ -25,6 +25,16 @@ const batchActionSchema = zod.object({
     .optional()
     .describe('Navigation type for navigate_page. Defaults to "url".'),
   ignoreCache: zod.boolean().optional().describe('For navigate_page reload.'),
+  waitUntil: zod
+    .enum(['load', 'domcontentloaded', 'networkidle0', 'networkidle2'])
+    .optional()
+    .describe('When to consider navigate_page succeeded. Defaults to "load".'),
+  waitForStableDom: zod
+    .boolean()
+    .optional()
+    .describe(
+      'Whether to wait up to 3s for DOM mutations to settle after navigate_page.',
+    ),
   timeout: zod
     .number()
     .int()
@@ -113,26 +123,44 @@ export const batchActions: PageToolFactory = definePageTool(
               }
               const options = {
                 timeout: action.timeout,
+                ...(action.waitUntil ? {waitUntil: action.waitUntil} : {}),
               };
-              const result = await page.waitForEventsAfterAction(async () => {
-                if (navType === 'url') {
-                  if (!action.url) {
-                    throw new Error(
-                      'A URL is required for navigate_page with navType="url".',
-                    );
+              const waitForStableDom =
+                action.waitForStableDom ??
+                (action.waitUntil === 'domcontentloaded' ? false : undefined);
+              const result = await page.waitForEventsAfterAction(
+                async () => {
+                  if (navType === 'url') {
+                    if (!action.url) {
+                      throw new Error(
+                        'A URL is required for navigate_page with navType="url".',
+                      );
+                    }
+                    await page.pptrPage.goto(action.url, options);
+                  } else if (navType === 'back') {
+                    await page.pptrPage.goBack(options);
+                  } else if (navType === 'forward') {
+                    await page.pptrPage.goForward(options);
+                  } else if (navType === 'reload') {
+                    await page.pptrPage.reload({
+                      ...options,
+                      ignoreCache: action.ignoreCache,
+                    });
                   }
-                  await page.pptrPage.goto(action.url, options);
-                } else if (navType === 'back') {
-                  await page.pptrPage.goBack(options);
-                } else if (navType === 'forward') {
-                  await page.pptrPage.goForward(options);
-                } else if (navType === 'reload') {
-                  await page.pptrPage.reload({
-                    ...options,
-                    ignoreCache: action.ignoreCache,
-                  });
-                }
-              });
+                },
+                ...(waitForStableDom !== undefined || action.waitUntil
+                  ? [
+                      {
+                        ...(waitForStableDom !== undefined
+                          ? {waitForStableDom}
+                          : {}),
+                        ...(action.waitUntil
+                          ? {waitUntil: action.waitUntil}
+                          : {}),
+                      },
+                    ]
+                  : []),
+              );
               response.attachWaitForResult(result);
               response.appendResponseLine(
                 `[${i + 1}] navigate_page (${navType}): OK (${page.pptrPage.url()})`,

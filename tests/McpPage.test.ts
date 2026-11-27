@@ -1717,6 +1717,33 @@ describe('McpPage', () => {
       sinon.assert.notCalled(target.page);
     });
 
+    it('does not initialize DevTools universe during init() and deduplicates concurrent ensureDevToolsUniverse() calls', async () => {
+      const config = createMockServerConfig();
+      const pptrPage = createMockPuppeteerPage();
+      const cdpSession = createMockCDPSession();
+      pptrPage.createCDPSession.resolves(cdpSession);
+      const target = createMockPuppeteerTarget({page: pptrPage});
+      const mcpPage = new McpPage(target, 1, {
+        config,
+        locatorClass: Locator,
+      });
+
+      await mcpPage.init();
+
+      assert.strictEqual(mcpPage.devtoolsUniverse, undefined);
+      sinon.assert.notCalled(pptrPage.createCDPSession);
+
+      const [first, second] = await Promise.all([
+        mcpPage.ensureDevToolsUniverse(),
+        mcpPage.ensureDevToolsUniverse(),
+      ]);
+
+      assert.ok(first);
+      assert.strictEqual(first, second);
+      assert.strictEqual(mcpPage.devtoolsUniverse, first);
+      sinon.assert.calledOnce(pptrPage.createCDPSession);
+    });
+
     it('updates JS and CSS source map settings on an initialized DevTools universe', async () => {
       const config = createMockServerConfig();
       const pptrPage = createMockPuppeteerPage();
@@ -1727,6 +1754,7 @@ describe('McpPage', () => {
         locatorClass: Locator,
       });
       await mcpPage.init();
+      await mcpPage.ensureDevToolsUniverse();
 
       config.commit(createMockServerConfig({sourceMaps: false}));
       mcpPage.syncSourceMaps();
@@ -1759,6 +1787,7 @@ describe('McpPage', () => {
 
       config.commit(createMockServerConfig({sourceMaps: false}));
       await mcpPage.init();
+      await mcpPage.ensureDevToolsUniverse();
 
       const settings = mcpPage.devtoolsUniverse?.universe.settings;
       assert.ok(settings);
@@ -3076,8 +3105,7 @@ describe('McpPage logpoints', () => {
       const pptrPage = createMockPuppeteerPage();
       pptrPage.emulateFocusedPage.resolves();
       const authSession = createMockCDPSession();
-      pptrPage.createCDPSession.onFirstCall().resolves(createMockCDPSession());
-      pptrPage.createCDPSession.onSecondCall().resolves(authSession);
+      pptrPage.createCDPSession.resolves(authSession);
 
       const mcpPage = new McpPage(
         createMockPuppeteerTarget({page: pptrPage}),

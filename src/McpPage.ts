@@ -441,6 +441,7 @@ export class McpPage implements ContextPage {
   // Metadata
   isolatedContextName?: string;
   #devtoolsUniverse?: TargetUniverse;
+  #devtoolsUniversePromise?: Promise<TargetUniverse | undefined>;
   #webAuthnEnabled = false;
   #webAuthnAuthenticator?: WebAuthnAuthenticator;
 
@@ -674,7 +675,6 @@ export class McpPage implements ContextPage {
     }
     this.updateTimeouts();
     await Promise.all([
-      this.#initDevToolsUniverseNoThrow(),
       this.syncFileChooserInterception(),
       this.#syncAuthInterception(),
     ]);
@@ -873,18 +873,44 @@ export class McpPage implements ContextPage {
     });
   }
 
-  async #initDevToolsUniverseNoThrow(): Promise<void> {
-    if (this.#devtoolsUniverse) {
+  async ensureDevToolsUniverse(): Promise<TargetUniverse | undefined> {
+    if (this.devtoolsUniverse) {
+      return this.devtoolsUniverse;
+    }
+    if (this.#disposed || this.#closed) {
       return undefined;
     }
-    try {
-      const session = await this.pptrPage.createCDPSession();
-      this.#devtoolsUniverse = await createTargetUniverse(session, {
-        sourceMaps: this.#config.resolved.sourceMaps,
-      });
-    } catch (e) {
-      logger?.('Failed to initialize DevTools universe', e);
+    if (!this.#devtoolsUniversePromise) {
+      this.#devtoolsUniversePromise = (async () => {
+        let session:
+          | Awaited<ReturnType<typeof this.pptrPage.createCDPSession>>
+          | undefined;
+        try {
+          session = await this.pptrPage.createCDPSession();
+          if (this.#disposed || this.#closed) {
+            void session.detach().catch(() => {});
+            return undefined;
+          }
+          const universe = await createTargetUniverse(session, {
+            sourceMaps: this.#config.resolved.sourceMaps,
+          });
+          if (this.#disposed || this.#closed) {
+            universe.universe.dispose();
+            void session.detach().catch(() => {});
+            return undefined;
+          }
+          this.#devtoolsUniverse = universe;
+          return this.#devtoolsUniverse;
+        } catch (e) {
+          void session?.detach().catch(() => {});
+          logger?.('Failed to initialize DevTools universe', e);
+          return undefined;
+        } finally {
+          this.#devtoolsUniversePromise = undefined;
+        }
+      })();
     }
+    return await this.#devtoolsUniversePromise;
   }
 
   syncSourceMaps(): void {
@@ -909,12 +935,12 @@ export class McpPage implements ContextPage {
    * {@link LogpointManager.setLogpoints}. The manager is created on first
    * use, so an empty list on a page without logpoints is a no-op.
    */
-  setLogpoints(logpoints: LogpointOptions[]): Promise<Logpoint[]> {
+  async setLogpoints(logpoints: LogpointOptions[]): Promise<Logpoint[]> {
     if (!this.#logpointManager) {
       if (logpoints.length === 0) {
-        return Promise.resolve([]);
+        return [];
       }
-      const devtoolsUniverse = this.devtoolsUniverse;
+      const devtoolsUniverse = await this.ensureDevToolsUniverse();
       if (!devtoolsUniverse) {
         throw new Error(
           `DevTools universe is not available for page ${this.id ?? '?'}.`,
@@ -922,7 +948,7 @@ export class McpPage implements ContextPage {
       }
       this.#logpointManager = new LogpointManager(devtoolsUniverse);
     }
-    return this.#logpointManager.setLogpoints(logpoints);
+    return await this.#logpointManager.setLogpoints(logpoints);
   }
 
   getWebAuthnAuthenticator():
@@ -937,7 +963,8 @@ export class McpPage implements ContextPage {
   async configureWebAuthn(
     config: WebAuthnAuthenticatorConfig,
   ): Promise<WebAuthnAuthenticatorState | undefined> {
-    const model = this.devtoolsUniverse?.target.model(
+    const devtoolsUniverse = await this.ensureDevToolsUniverse();
+    const model = devtoolsUniverse?.target.model(
       DevTools.WebAuthnModel.WebAuthnModel,
     );
     if (!model) {
@@ -2036,6 +2063,7 @@ export class McpPage implements ContextPage {
     action: (signal: AbortSignal) => Promise<unknown>,
     options?: {
       timeout?: number;
+      waitUntil?: 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2';
       waitForStableDom?: boolean;
       expectNavigationIn?: number;
       handleDialog?:
@@ -2118,6 +2146,7 @@ export class McpPage implements ContextPage {
     this.#logpointManager = undefined;
     const devtoolsUniverse = this.#devtoolsUniverse;
     this.#devtoolsUniverse = undefined;
+    this.#devtoolsUniversePromise = undefined;
     this.#webAuthnAuthenticator = undefined;
     devtoolsUniverse?.universe.dispose();
     void devtoolsUniverse?.session.detach().catch(e => {
@@ -2502,13 +2531,14 @@ export class McpPage implements ContextPage {
       );
     }
 
-    if (!this.#devtoolsUniverse) {
+    const devtoolsUniverse = await this.ensureDevToolsUniverse();
+    if (!devtoolsUniverse) {
       throw new Error(
         `DevTools universe is not available for page ${this.id ?? '?'}.`,
       );
     }
 
-    const targetManager = this.#devtoolsUniverse.universe.context.get(
+    const targetManager = devtoolsUniverse.universe.context.get(
       DevTools.TargetManager,
     );
     let domNode: DevTools.DOMModel.DOMNode | undefined;

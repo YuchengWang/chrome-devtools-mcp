@@ -197,6 +197,18 @@ export const newPage: ToolFactory = defineTool((args: ParsedArguments) => {
             'Pages in the same browser context share cookies and storage. ' +
             'Pages in different browser contexts are fully isolated (useful for clean-slate testing of cookies and authentication).',
         ),
+      waitUntil: zod
+        .enum(['load', 'domcontentloaded', 'networkidle0', 'networkidle2'])
+        .optional()
+        .describe(
+          'When to consider navigation succeeded. Defaults to "load". Use "domcontentloaded" for heavy SPAs like Gmail/YouTube.',
+        ),
+      waitForStableDom: zod
+        .boolean()
+        .optional()
+        .describe(
+          'Whether to wait up to 3s for DOM mutations to settle after navigation. Defaults to true.',
+        ),
       ...timeoutSchema,
     },
     blockedByDialog: false,
@@ -224,13 +236,25 @@ export const newPage: ToolFactory = defineTool((args: ParsedArguments) => {
       response.includeConsoleErrorsFrom(page);
 
       try {
+        const waitForStableDom =
+          request.params.waitForStableDom ??
+          (request.params.waitUntil === 'domcontentloaded' ? false : undefined);
         await page.waitForEventsAfterAction(
           async () => {
             await page.pptrPage.goto(request.params.url, {
               timeout: request.params.timeout,
+              ...(request.params.waitUntil
+                ? {waitUntil: request.params.waitUntil}
+                : {}),
             });
           },
-          {timeout: request.params.timeout},
+          {
+            timeout: request.params.timeout,
+            ...(request.params.waitUntil
+              ? {waitUntil: request.params.waitUntil}
+              : {}),
+            waitForStableDom,
+          },
         );
       } catch (error) {
         if (isBrowserDisconnected(page)) {
@@ -313,6 +337,18 @@ export const navigatePage: PageToolFactory = definePageTool(
                 ),
             }
           : {}),
+        waitUntil: zod
+          .enum(['load', 'domcontentloaded', 'networkidle0', 'networkidle2'])
+          .optional()
+          .describe(
+            'When to consider navigation succeeded. Defaults to "load". Use "domcontentloaded" for heavy SPAs like Gmail/YouTube.',
+          ),
+        waitForStableDom: zod
+          .boolean()
+          .optional()
+          .describe(
+            'Whether to wait up to 3s for DOM mutations to settle after navigation. Defaults to true.',
+          ),
         ...timeoutSchema,
       },
       blockedByDialog: false,
@@ -322,6 +358,9 @@ export const navigatePage: PageToolFactory = definePageTool(
         const page = request.page;
         const options = {
           timeout: request.params.timeout,
+          ...(request.params.waitUntil
+            ? {waitUntil: request.params.waitUntil}
+            : {}),
         };
 
         if (!request.params.type && !request.params.url) {
@@ -384,6 +423,11 @@ export const navigatePage: PageToolFactory = definePageTool(
 
         try {
           const action = request.params.handleBeforeUnload ?? 'accept';
+          const waitForStableDom =
+            request.params.waitForStableDom ??
+            (request.params.waitUntil === 'domcontentloaded'
+              ? false
+              : undefined);
           const result = await page.waitForEventsAfterAction(
             async () => {
               switch (request.params.type) {
@@ -432,6 +476,10 @@ export const navigatePage: PageToolFactory = definePageTool(
             },
             {
               timeout: request.params.timeout,
+              ...(request.params.waitUntil
+                ? {waitUntil: request.params.waitUntil}
+                : {}),
+              waitForStableDom,
               handleDialog: {beforeunload: action},
             },
           );

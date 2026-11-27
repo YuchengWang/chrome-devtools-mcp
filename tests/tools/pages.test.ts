@@ -644,6 +644,47 @@ describe('pages', () => {
         assert.ok(response.includePages);
       });
     });
+
+    it('defaults waitForStableDom to false when waitUntil is domcontentloaded unless explicitly set', async () => {
+      const {page, context, response, args} = createHandlerMocks();
+      context.newPage.resolves(page);
+      page.pptrPage.goto.resolves(null);
+
+      await newPage(args).handler(
+        {
+          params: {
+            url: 'https://example.com',
+            waitUntil: 'domcontentloaded',
+          },
+        },
+        response,
+        context,
+      );
+
+      assert.deepStrictEqual(page.waitForEventsAfterAction.firstCall.args[1], {
+        timeout: undefined,
+        waitUntil: 'domcontentloaded',
+        waitForStableDom: false,
+      });
+
+      await newPage(args).handler(
+        {
+          params: {
+            url: 'https://example.com',
+            waitUntil: 'domcontentloaded',
+            waitForStableDom: true,
+          },
+        },
+        response,
+        context,
+      );
+
+      assert.deepStrictEqual(page.waitForEventsAfterAction.secondCall.args[1], {
+        timeout: undefined,
+        waitUntil: 'domcontentloaded',
+        waitForStableDom: true,
+      });
+    });
   });
   describe('new_page with isolatedContext', () => {
     it('creates a page in an isolated context', async () => {
@@ -1675,6 +1716,50 @@ describe('pages', () => {
 
       sinon.assert.notCalled(page.pptrPage.removeScriptToEvaluateOnNewDocument);
       sinon.assert.notCalled(response.setIncludePages);
+    });
+
+    it('defaults waitForStableDom to false when waitUntil is domcontentloaded unless explicitly set', async () => {
+      const {page, context, response, args} = createHandlerMocks();
+      page.pptrPage.goto.resolves(null);
+
+      await navigatePage(args).handler(
+        {
+          params: {
+            url: 'https://example.com',
+            waitUntil: 'domcontentloaded',
+          },
+          page,
+        },
+        response,
+        context,
+      );
+
+      assert.deepStrictEqual(page.waitForEventsAfterAction.firstCall.args[1], {
+        timeout: undefined,
+        waitUntil: 'domcontentloaded',
+        waitForStableDom: false,
+        handleDialog: {beforeunload: 'accept'},
+      });
+
+      await navigatePage(args).handler(
+        {
+          params: {
+            url: 'https://example.com',
+            waitUntil: 'domcontentloaded',
+            waitForStableDom: true,
+          },
+          page,
+        },
+        response,
+        context,
+      );
+
+      assert.deepStrictEqual(page.waitForEventsAfterAction.secondCall.args[1], {
+        timeout: undefined,
+        waitUntil: 'domcontentloaded',
+        waitForStableDom: true,
+        handleDialog: {beforeunload: 'accept'},
+      });
     });
   });
   describe('resize', () => {

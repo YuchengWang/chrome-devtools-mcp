@@ -660,10 +660,13 @@ export class McpResponse implements Response {
     const message = this.#page.getConsoleMessageById(consoleMessageStableId);
     if ('args' in message || message instanceof UncaughtError) {
       const consoleMessage = message as ConsoleMessage | UncaughtError;
+      const devTools =
+        (await this.#page.ensureDevToolsUniverse?.()) ??
+        this.#page.devtoolsUniverse;
       return await ConsoleFormatter.from(consoleMessage, {
         id: consoleMessageStableId,
         fetchDetailedData: true,
-        devTools: this.#page.devtoolsUniverse,
+        devTools,
       });
     }
     if (message instanceof DevTools.AggregatedIssue) {
@@ -777,6 +780,14 @@ export class McpResponse implements Response {
       });
     }
 
+    if (messages.length === 0) {
+      return [];
+    }
+    const devTools = page
+      ? options.includeStackTraces
+        ? ((await page.ensureDevToolsUniverse?.()) ?? page.devtoolsUniverse)
+        : page.devtoolsUniverse
+      : undefined;
     return (
       await Promise.all(
         messages.map(
@@ -788,7 +799,7 @@ export class McpResponse implements Response {
                 id: consoleMessageStableId,
                 fetchDetailedData: false,
                 fetchStackTrace: options.includeStackTraces,
-                devTools: page ? page.devtoolsUniverse : undefined,
+                devTools,
               });
             }
             if (item instanceof DevTools.AggregatedIssue) {

@@ -114,4 +114,59 @@ describe('batch_actions', () => {
     assert.ok(text.includes('[2] wait_for (["Present"]): OK'));
     assert.ok(Buffer.byteLength(text, 'utf8') <= 8800);
   });
+
+  it('forwards waitUntil and waitForStableDom for navigate_page url and reload', async () => {
+    const {page, context, response, args} = createHandlerMocks();
+    page.pptrPage.goto.resolves(null);
+    page.pptrPage.reload.resolves(null);
+    page.pptrPage.url.returns('https://example.com');
+
+    await batchActions(args).handler(
+      {
+        params: {
+          actions: [
+            {
+              type: 'navigate_page',
+              url: 'https://example.com',
+              waitUntil: 'domcontentloaded',
+            },
+            {
+              type: 'navigate_page',
+              navType: 'reload',
+              ignoreCache: true,
+              waitUntil: 'networkidle2',
+              waitForStableDom: true,
+              timeout: 5000,
+            },
+          ],
+        },
+        page,
+      },
+      response,
+      context,
+    );
+
+    sinon.assert.calledOnceWithExactly(
+      page.pptrPage.goto,
+      'https://example.com',
+      {
+        timeout: undefined,
+        waitUntil: 'domcontentloaded',
+      },
+    );
+    sinon.assert.calledOnceWithExactly(page.pptrPage.reload, {
+      timeout: 5000,
+      waitUntil: 'networkidle2',
+      ignoreCache: true,
+    });
+    sinon.assert.calledTwice(page.waitForEventsAfterAction);
+    assert.deepStrictEqual(page.waitForEventsAfterAction.firstCall.args[1], {
+      waitUntil: 'domcontentloaded',
+      waitForStableDom: false,
+    });
+    assert.deepStrictEqual(page.waitForEventsAfterAction.secondCall.args[1], {
+      waitUntil: 'networkidle2',
+      waitForStableDom: true,
+    });
+  });
 });
